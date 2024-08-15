@@ -1,4 +1,4 @@
-# Aedes albopictus SNP Chip Analysis
+# Aedes albopictus Autogeny
 
 This repository contains the code and resources to replicate the analysis for the AUT line conducted using the Aedes albopictus SNP chip data. The analysis covers a range of genomic investigations, including quality control, selection scans, functional annotation, and more.
 
