@@ -1,0 +1,311 @@
+---
+title: "Autogenous - Functional annotation of SNPs using SnpEff"
+author: "Luciano V Cosme"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    highlight: breezedark
+    css:
+      - "styles.css"
+    toc: yes
+    toc_float: no
+    toc_depth: 5
+editor_options:
+  markdown:
+    wrap: 120
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  eval                        = TRUE,
+  echo                        = TRUE,
+  cache                       = TRUE, # tidy = TRUE,
+  class.output                = "bg-success"
+)
+knitr::opts_knit$set(
+  root.dir = rprojroot::find_rstudio_root_file()
+)
+```
+
+## 1. Load the libraries
+
+```{r load_libraries, message=FALSE, warning=FALSE, results='hide'}
+library(tidyverse)
+library(here)
+library(colorout)
+library(dplyr)
+library(flextable)
+library(ggstatsplot)
+library(ggplot2)
+library(scales)
+library(reticulate)
+library(extrafont)
+library(stringr)
+library(flextable)
+library(officer)
+library(vroom)
+library(gt)
+library(ggrepel)
+library(janitor)
+```
+
+## 2. Download SnpEff
+
+We will used SnpEff to perform a functional annotation of our SNPs You can download the software
+[HERE](https://pcingola.github.io/SnpEff/). They have great documentation that it is worth checking it
+[HERE](https://pcingola.github.io/SnpEff/se_commandline/).
+
+```{bash download_SnpEff, eval=FALSE}
+# move to the directory you want to download it
+# Download and install SnpEff
+curl -v -L 'https://snpeff.blob.core.windows.net/versions/snpEff_latest_core.zip' > snpEff_latest_core.zip
+unzip snpEff_latest_core.zip
+```
+
+## 3. Use SnpEff laptop
+
+Our first step is to create a database using the AalbF3 using the annotation file (gff format). There is one database
+for Aedes albopictus on the SnpEff databases, but it is for the AalbF1. We cannot use it.
+
+```{bash check_annotation_file}
+# lets check our annotation file
+head -n 2 data/files/genes.gff
+```
+
+Create database for AalbF3. SnpEff documentation [HERE](https://pcingola.github.io/SnpEff/se_build_db_gff_gtf/):
+
+    There are three main steps when building a database:
+
+    Step 1: Configure a new genome in SnpEff's config file snpEff.config.
+    Step 2: Build using gene annotations and reference sequences
+    Step 3: Checking the database: SnpEff will check the database by comparing predicted protein sequences and CDS sequences with ones provided by the user.
+
+Documentation regarding building database using GFF file:
+
+    GFF File name
+
+    SnpEff expects the GFF file to be located at
+
+
+    $SNPEFF_HOME/data/GENOME_NAME/genes.gff
+    where:
+
+    $SNPEFF_HOME is the directory where SnpEff is installed (usually $HOME/snpEff)
+    GENOME_NAME is the genome name of the genome you are trying to build, which MUST match the name you added in the config file snpEff.config
+    Note: The file name can be genes.gff.gz if it's compressed using gzip.
+
+```{bash, create_SnpEff_data_base, eval=FALSE}
+# change the path to the location you have SnpEff
+# make sure you move the gene.gff to the directory you have SnpEff
+# also add the genome to snpEff.config at SnpEff home directory
+echo "albo_v3.genome : Albopictus" >> snpEff.config
+#
+# then build the database, in my case I had a few databases that I used previously. You can name it anyway you want.
+java -Xmx8g -jar /Users/lucianocosme/Packages/snpEff/snpEff.jar build -gff3 -v albo_v3
+```
+
+Check SnpEff options
+
+```{bash check_all_options_SnpEff, eval=FALSE}
+# This will show a 'help' message
+java -jar /Users/lucianocosme/Packages/snpEff/snpEff.jar
+```
+
+## 4. Perform variant annotation
+
+```{bash, eval=FALSE, cache=TRUE, message=FALSE, results='hide'}
+# then annotate the vcf with the v4
+java -Xmx8g -jar /Users/lucianocosme/Packages/snpEff/snpEff.jar albo_v3 output/snpeff/albo.vcf -v > output/snpeff/albo_ann.vcf
+
+```
+
+Move files to output
+
+```{bash, eval=FALSE}
+# SnpEff will create a .txt and a .html file in our project root directory, we can move them to the right place
+mv snpEff_* output/snpeff/
+# you can double click the file snpEff_summary.html to see the summary of our annotation
+```
+
+## 5. Check genes near the SNPs
+
+We found 4 SNPs that are within the coding region of the differentially expressed genes, now we will find what genes are located near the 158 SNPs from selection scans.
+
+Now we can grep the SNPs and find out what genes are nearby
+```{bash}
+grep -f output/snpeff/SNPs_158.txt output/snpeff/albo_ann.vcf > output/snpeff/genes_158_SNPs.txt;
+head output/snpeff/genes_158_SNPs.txt
+```
+Now we have to get the genes near each SNP.
+
+```{bash}
+sed -e 's/|/\t/g' -e 's/,/\t/g' -e 's/;/\t/g' -e 's/\t\+/\t/g' output/snpeff/genes_158_SNPs.txt | awk -F"\t" '{
+    for(i = 1; i <= NF; ++i) {
+        if ($i == "GT") {
+            break
+        } else {
+            if ($i !~ /\//) {
+                printf "%s\t", $i
+            }
+        }
+    }
+    printf "\n"
+}' > output/snpeff/snps_autogenous.txt
+```
+
+
+```{bash}
+sed -e 's/|/\t/g' -e 's/,/\t/g' -e 's/;/\t/g' -e 's/\t\+/\t/g' output/snpeff/genes_158_SNPs.txt | awk -F"\t" '{
+    for(i = 1; i <= NF; ++i) {
+        if ($i == "GT") {
+            break
+        } else {
+            if ($i !~ /\//) {
+                printf "%s\t", $i
+            }
+        }
+    }
+    printf "\n"
+}' | awk -F '\t' '{print $1, $2, $3, $10, $11, $12, $13, $17, $18, $19, $20}' > output/snpeff/snps_autogenous.txt;
+head output/snpeff/snps_autogenous.txt
+```
+
+Import the data
+```{r}
+# Read the tab-delimited file into R
+snps_autogenous <- read_delim(here("output", "snpeff", "snps_autogenous.txt"), delim = " ", col_names = FALSE, show_col_types = FALSE)
+head(snps_autogenous)
+```
+
+Since we already found out that only 4 SNPs are withing genes, we can remove the variants based on their effect
+```{r}
+snps_autogenous <- snps_autogenous |> 
+  filter(!X4 %in% c("synonymous_variant", "intron_variant", "missense_variant", "splice_region_variant&intron_variant"))
+
+head(snps_autogenous)
+```
+
+Some of the genes do not have the LOC name, we can get it from the gff file
+```{bash}
+grep "exon-XM_029870196.1-1" data/files/genes.gff
+```
+
+Alternatively we can try bedtools and see if we get the correct ids since SNPeff did not. We could grep each transcript from the gff file, but that would take time. Make sure you have bedtools installed and in your environment
+
+Create bed file from gff file
+```{bash}
+awk 'BEGIN {OFS="\t"} $3=="gene" {print $1, $4-1, $5, $9}' data/files/genes.gff > output/snpeff/genes.bed
+```
+
+Sort the bed file and the SNP file
+
+
+SNPs
+```{bash}
+awk 'BEGIN {OFS="\t"} {print $2, $3, $4, $1}' output/snpeff/snps_functional.bed > output/snpeff/snps_functional_rearranged.bed;
+sort -k1,1 -k2,2n output/snpeff/snps_functional_rearranged.bed > output/snpeff/snps_functional_sorted.bed;
+head output/snpeff/snps_functional_sorted.bed
+```
+
+Genes
+```{bash}
+sort -k1,1 -k2,2n output/snpeff/genes.bed > output/snpeff/genes_sorted.bed;
+
+# Remove the chr from the genes
+awk 'BEGIN {OFS="\t"} {gsub(/^chr/, "", $1); print $0}' output/snpeff/genes_sorted.bed > output/snpeff/genes_sorted_no_chr.bed;
+head output/snpeff/genes_sorted_no_chr.bed
+```
+
+Check the SNP file
+```{bash}
+head output/snpeff/snps_functional_sorted.bed
+```
+
+
+
+Use bedtools closest: This command finds the closest gene for each SNP. It outputs the original BED entries plus the closest gene's BED entry.
+```{bash}
+bedtools closest -a output/snpeff/snps_functional_sorted.bed -b output/snpeff/genes_sorted_no_chr.bed -D "ref" > output/snpeff/closest_genes.bed;
+head output/snpeff/closest_genes.bed
+```
+
+We can use a 10kb window around the SNP and see if there is any gene nearby
+```{bash}
+# First, expand the SNP regions by 10kb on both sides
+bedtools slop -i output/snpeff/snps_functional_sorted.bed -g data/genome/scaffold_sizes.txt -b 10000 > output/snpeff/snps_10k.bed;
+head output/snpeff/snps_10k.bed
+```
+
+Now find the genes in the "20kb" region of the SNP
+```{bash}
+# Then find the closest gene and report the distance
+bedtools closest -a output/snpeff/snps_10k.bed -b output/snpeff/genes_sorted_no_chr.bed -D "ref" -d > output/snpeff/closest_genes_within_10kb.bed;
+head output/snpeff/closest_genes_within_10kb.bed
+```
+
+
+Check it out
+```{bash}
+awk 'match($4, /AX-[0-9]+/) {snp=substr($4, RSTART, RLENGTH)} match($8, /LOC[0-9]+/) {gene=substr($8, RSTART, RLENGTH)} {if(snp && gene) print snp, gene; snp=""; gene=""}' output/snpeff/closest_genes_within_10kb.bed > output/snpeff/genes_10kb_snps.txt;
+head output/snpeff/genes_10kb_snps.txt
+```
+
+
+Now we can import the data to R and see if we have any of these genes withing 10kb from a SNP from the selection scan
+
+Import the data
+```{r}
+# Read the tab-delimited file into R
+closest_genes <- read_delim(here("output", "snpeff", "genes_10kb_snps.txt"), delim = " ", col_names = c("SNP", "Gene_ID"), show_col_types = FALSE)
+head(closest_genes)
+```
+
+
+Now we can import gene expression data
+```{r}
+gene_expression <- read_delim(here("data", "files","MANvsAUTO_sig_mRNAs.csv"), delim = ",", col_names = TRUE, show_col_types = FALSE) |>
+  dplyr::select(
+    gene,log2FoldChange 
+  ) |>
+  dplyr::rename(
+    Gene_ID = gene
+  )
+head(gene_expression)
+```
+
+Merge
+```{r}
+gene_snps_exp <- inner_join(gene_expression, closest_genes, by = "Gene_ID")
+head(gene_snps_exp)
+```
+We identify the same 4 SNPs that we found with R.
+
+We can check their function
+```{bash}
+grep "AX-581302901" output/snpeff/albo_ann.vcf 
+```
+
+```{bash}
+grep "AX-581504582" output/snpeff/albo_ann.vcf 
+```
+
+```{bash}
+grep "AX-583054970" output/snpeff/albo_ann.vcf 
+```
+
+```{bash}
+grep "AX-583972796" output/snpeff/albo_ann.vcf 
+```
+
+
+Grep the 19 SNPs from the cluster 14 on chromosome 2
+```{bash}
+grep -E "AX-579474142|AX-579474650|AX-579509845|AX-579556477|AX-579560686|AX-579564292|AX-579565469|AX-579580051|AX-579584369|AX-579583040|AX-579584883|AX-579596233|AX-579602153|AX-579603553|AX-579604213|AX-579607140|AX-579618571|AX-579619995|AX-579620627" output/snpeff/albo_ann.vcf
+```
+
+
+
+
+
+
+

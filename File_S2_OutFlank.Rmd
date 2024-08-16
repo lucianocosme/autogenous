@@ -1,0 +1,1908 @@
+---
+title: "Autogenous - Selection scan with outFlank"
+author: "Luciano V Cosme"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    highlight: breezedark
+    css:
+      - "styles.css"
+    toc: yes
+    toc_float: no
+    toc_depth: 5
+editor_options:
+  markdown:
+    wrap: 120
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  eval                        = TRUE,
+  echo                        = TRUE,
+  cache                       = TRUE, # tidy = TRUE,
+  class.output                = "bg-success"
+)
+knitr::opts_knit$set(
+  root.dir = rprojroot::find_rstudio_root_file()
+)
+```
+
+
+# Overview
+
+In this RMarkdown we will overview how to run local adaptation analysis with R.Sambada
+
+## 1. R libraries and software
+
+```{r libraries, message=FALSE, warning=FALSE, results='hide'}
+library(tidyverse)
+library(colorout)
+library(here)
+library(ggplot2)
+# library(Biostrings)
+library(scales)
+# library(reticulate)
+# library(flextable)
+# library(officer)
+# library(rmdformats)
+library(extrafont)
+library(forcats)
+library(ggrepel)
+library(ggtext)
+# library(R.SamBada)
+library(rgdal)
+library(stats)
+library(geosphere)
+library(vcfR)
+library(OutFLANK)
+library(ggvenn)
+```
+
+
+## 2. outFLANK with all 3 populations (MAN, NEW and AUT)
+
+This tool does not directly account for population structure. It instead looks for loci that show a higher Fst than the neutral expectation, under a model of hierarchical population structure. The method is robust to hierarchical population structure and a range of demographic histories.
+
+Check the documentation https://htmlpreview.github.io/?https://github.com/whitlock/OutFLANK/blob/master/inst/doc/OutFLANKAnalysis.html
+
+"OutFLANK is an R package that implements the method developed by Whitlock and Lotterhos (2015) to use likelihood on a trimmed distribution of FST values to infer the distribution of FST for neutral markers. This distribution is then used to assign q-values to each locus to detect outliers that may be due to spatially heterogeneous selection."
+
+Clean env and memory
+```{r}
+# Remove all objects from the environment
+rm(list = ls())
+
+# Run the garbage collector to free up memory
+gc()
+```
+
+Check vignettes
+```{r}
+browseVignettes("OutFLANK")
+```
+
+### 2.1 OutFLANK analysis with quasi-independent set of SNPs
+
+Extract the intergenic SNPs and do LD pruning
+```{bash}
+plink2 \
+--bfile output/quality_control/file7 \
+--extract data/files/intergenic_SNPs.txt \
+--indep-pairwise 5 1 0.1 \
+--out output/outflank/indepSNP \
+--silent;
+grep 'samples\|variants\|remaining' output/outflank/indepSNP.log
+```
+
+
+Create vcf with intergenic SNPs that are not linked
+```{bash}
+plink2 \
+--bfile output/quality_control/file7 \
+--extract output/outflank/indepSNP.prune.in \
+--export vcf \
+--make-bed \
+--maf 0.1 \
+--geno 0.2 \
+--out output/outflank/intergenic \
+--silent;
+grep 'samples\|variants\|remaining' output/outflank/intergenic.log
+```
+
+
+We need to import the data
+
+```{r}
+# Read your vcf file
+vcf <- read.vcfR(here("output","outflank","intergenic.vcf"))
+
+# Extract genotypes
+geno <- vcfR::extract.gt(vcf)
+
+# Extract locus names (positions)
+locusNames <- vcfR::getPOS(vcf)
+
+# Samples
+sampleNames <- colnames(geno)
+
+# Extract population names by splitting the sample names
+# If your sample names contain population information.
+popNames <- sapply(strsplit(sampleNames, "_"), "[", 1)
+
+# Initialize new matrix for transformed genotypes
+G <- matrix(NA, nrow = nrow(geno), ncol = ncol(geno))
+
+# Recode genotypes
+G[geno %in% c("0/0", "0|0")] <- 0
+G[geno %in% c("0/1", "1/0", "1|0", "0|1")] <- 1
+G[geno %in% c("1/1", "1|1")] <- 2
+
+# Replace NA with 9 for missing data
+G <- replace(G, is.na(G), 9)
+
+# Check the counts of each genotype
+table(as.vector(G))
+
+# Extract SNP names
+snpNames <- vcfR::getID(vcf)
+
+# Calculate FST with SNP names
+my_fst <- MakeDiploidFSTMat(t(G), locusNames = snpNames, popNames = popNames)
+
+head(my_fst)
+```
+Check the FST distribution
+```{r}
+# Create the histogram of FST values
+ggplot(my_fst, aes(x=FST)) +
+  geom_histogram(binwidth=0.001, fill="blue", alpha=0.7) +
+  labs(title="Histogram of FST Values",
+       x="FST",
+       y="Frequency") +
+  theme_minimal()
+```
+
+We can select the SNPs with low FST to use as neutral SNPs
+```{r}
+my_fst |>
+  filter(FST < 0.2 & FST >=-0.1) |>
+  dplyr::select(LocusName) -> neutral_snps
+
+length(neutral_snps$LocusName)
+
+write.table(
+  neutral_snps$LocusName,
+  file = here("output", "outflank","neutral_SNPs.txt"),
+  row.names = FALSE,
+  quote = FALSE,
+  col.names = FALSE,
+  sep = "\n"
+)
+```
+
+
+Create a vcf 
+```{bash}
+plink2 \
+--bfile output/outflank/intergenic \
+--export vcf \
+--extract output/outflank/neutral_SNPs.txt \
+--out output/outflank/neutral \
+--silent;
+grep "samples\|variants" output/outflank/neutral.log 
+```
+
+Import the data.
+
+```{r}
+# Read your vcf file
+vcf <- read.vcfR(here("output","outflank","neutral.vcf"))
+# vcf <- read.vcfR(here("output","outflank","intergenic.vcf"))
+# Extract genotypes
+geno <- vcfR::extract.gt(vcf)
+
+# Extract locus names (positions)
+locusNames <- vcfR::getPOS(vcf)
+
+# Samples
+sampleNames <- colnames(geno)
+
+# Extract population names by splitting the sample names
+# If your sample names contain population information.
+popNames <- sapply(strsplit(sampleNames, "_"), "[", 1)
+
+# Initialize new matrix for transformed genotypes
+G <- matrix(NA, nrow = nrow(geno), ncol = ncol(geno))
+
+# Recode genotypes
+G[geno %in% c("0/0", "0|0")] <- 0
+G[geno %in% c("0/1", "1/0", "1|0", "0|1")] <- 1
+G[geno %in% c("1/1", "1|1")] <- 2
+
+# Replace NA with 9 for missing data
+G <- replace(G, is.na(G), 9)
+
+# Check the counts of each genotype
+table(as.vector(G))
+
+# Extract SNP names
+snpNames <- vcfR::getID(vcf)
+
+# Calculate FST with SNP names
+my_fst <- MakeDiploidFSTMat(t(G), locusNames = snpNames, popNames = popNames)
+
+head(my_fst)
+```
+Check the FST distribution
+```{r}
+# Create the histogram of FST values
+ggplot(my_fst, aes(x=FST)) +
+  geom_histogram(binwidth=0.001, fill="blue", alpha=0.7) +
+  labs(title="Histogram of FST Values",
+       x="FST",
+       y="Frequency") +
+  theme_minimal()
+```
+
+
+Data prep: decide which SNPs to use for calibrating the null distribution of Fst
+
+```{r}
+# Run OutFLANK to estimate the neutral FST distribution
+out_trim <- OutFLANK(FstDataFrame = my_fst, Hmin = 0.1, NumberOfSamples = 60, qthreshold = 0.05)
+str(out_trim)
+```
+Check the fit and make sure it looks good, especially in the right tail:
+```{r}
+OutFLANKResultsPlotter(
+  out_trim,
+  withOutliers = TRUE,
+  NoCorr = TRUE,
+  Hmin = 0.1,
+  binwidth = 0.001,
+  Zoom = FALSE,
+  RightZoomFraction = 0.05,
+  titletext = NULL
+)
+```
+
+
+```{r}
+## Zoom in on right tail
+OutFLANKResultsPlotter(
+  out_trim ,
+  withOutliers = TRUE,
+  NoCorr = TRUE,
+  Hmin = 0.1,
+  binwidth = 0.001,
+  Zoom =
+    TRUE,
+  RightZoomFraction = 0.05,
+  titletext = NULL
+)
+```
+
+
+```{r}
+plot(my_fst$FST, my_fst$FSTNoCorr)
+abline(0,1)
+```
+
+
+Also check the P-value histogram:
+Here, we plot the “right-tailed” P-values, which means that outliers in the right tail of the FST distribution will have a P-value near zero. Because we ran the algorithm on a trimmed set of SNPs, this will remove some of the signal around selected sites. So we expect this histogram to be flat and maybe have a bump near 0 for selected sites. This histogram looks pretty good.
+
+```{r}
+hist(out_trim$results$pvaluesRightTail)
+```
+
+
+
+
+### 2.2 Using estimated neutral mean FST and df to calculate P-values for all loci
+
+Now that we’ve estimated neutral mean FST and df to a quasi-independent set of SNPs, we can go and calculate P-values and q-values for all the loci in our dataset before prunning.
+
+Note that it is important to run this code with the uncorrected FSTs (FSTNoCorr) and the uncorrected mean FST (FSTNoCorrbar).
+
+Now we can use the entire data set to estimate the fst
+
+Create a vcf - ld pruned data
+```{bash}
+plink2 \
+--bfile output/quality_control/file7 \
+--export vcf \
+--extract output/quality_control/indepSNP.prune.in \
+--make-bed \
+--out output/outflank/autogenous \
+--silent;
+grep "samples\|variants" output/outflank/autogenous.log 
+```
+
+Import the data
+
+```{r}
+# Read your vcf file
+vcf2 <- read.vcfR(here("output","outflank","autogenous.vcf"))
+
+
+# Extract genotypes
+geno2 <- vcfR::extract.gt(vcf2)
+
+# Extract locus names (positions)
+locusNames2 <- vcfR::getPOS(vcf2)
+
+# Samples
+sampleNames2 <- colnames(geno2)
+
+# Extract population names by splitting the sample names
+# If your sample names contain population information.
+popNames2 <- sapply(strsplit(sampleNames2, "_"), "[", 1)
+
+# Initialize new matrix for transformed genotypes
+H <- matrix(NA, nrow = nrow(geno2), ncol = ncol(geno2))
+
+# Recode genotypes
+H[geno2 %in% c("0/0", "0|0")] <- 0
+H[geno2 %in% c("0/1", "1/0", "1|0", "0|1")] <- 1
+H[geno2 %in% c("1/1", "1|1")] <- 2
+
+# Replace NA with 9 for missing data
+H <- replace(H, is.na(H), 9)
+
+# Check the counts of each genotype
+table(as.vector(H))
+
+# Extract SNP names
+snpNames <- vcfR::getID(vcf2)
+
+# Use the option below for names if you want to make the plot without having to add the postion later on
+locusNames2 <- vcfR::getPOS(vcf2)
+
+# Calculate FST
+my_fst2 <- MakeDiploidFSTMat(t(H), locusNames = locusNames2, popNames = popNames2)
+my_fst3 <- MakeDiploidFSTMat(t(H), locusNames = snpNames, popNames = popNames2) # with SNP id instead of position
+
+# Concatenate the SNP names and the SNP positions
+locusNames3 <- paste(snpNames, locusNames2, sep = ".")
+
+# Calculate FST with the combined names
+my_fst4 <- MakeDiploidFSTMat(t(H), locusNames = locusNames3, popNames = popNames2)
+
+# Check output
+head(my_fst2)
+head(my_fst3)
+head(my_fst4)
+```
+
+Data checks: Heterozygosity vs. FST
+Here, you can see how some of the low H loci have high FST. These are all neutral loci in the simulation, and it is important to exclude them from the OutFLANK algorithm.
+
+Note that it is important to run this code with the uncorrected FSTs (FSTNoCorr) and the uncorrected mean FST (FSTNoCorrbar).
+
+```{r}
+P1 <-
+  pOutlierFinderChiSqNoCorr(
+    my_fst4,
+    Fstbar = out_trim$FSTNoCorrbar,
+    dfInferred = out_trim$dfInferred,
+    qthreshold = 0.05,
+    Hmin = 0.1
+  )
+head(P1)
+```
+
+
+```{r}
+tail(P1)
+```
+
+```{r}
+# notice how the output is ordered differently
+my_out <- P1$OutlierFlag==TRUE
+plot(P1$He, P1$FST, pch=19, col=rgb(0,0,0,0.1))
+points(P1$He[my_out], P1$FST[my_out], col="blue")
+# check the P-value histogram for the full set of data
+# if there are outliers, it should look flat with an inflation near 0
+```
+
+```{r}
+hist(P1$pvaluesRightTail)
+```
+
+Highlight outliers on Manhattan Plot
+
+For publication, we want to show the accurate estimate of FST, not the uncorrected estimate. Remember to exclude those low H loci!
+
+```{r}
+# Use the separate() function to split the LocusName column
+P1 <- P1 |>
+  separate(LocusName, into = c("SNP_id", "LocusName"), sep = "\\.")
+
+# Create plot
+plot(P1$LocusName[P1$He>0.1], P1$FST[P1$He>0.1],
+     xlab="Position", ylab="FST", col=rgb(0,0,0,0.2))
+  points(P1$LocusName[my_out], P1$FST[my_out], col="magenta", pch=20)  
+```
+output/local_adaptation/file3
+We can use our bim file to create a plot with the chromosomal ids
+```{r}
+#   ____________________________________________________________________________
+#   import the bim file with the SNP data                                   ####
+snps <-
+  read_delim(                    # to learn about the options use here, run ?read_delim on the console.
+    here(
+      "output", "outflank", "autogenous.bim"
+    ),                           # use library here to load it
+    col_names      = FALSE,      # we don't have header in the input file
+    show_col_types = FALSE,      # suppress message from read_delim
+    col_types      = "ccidcc"    # set the class of each column
+  )
+#
+# set column names
+colnames(
+  snps
+) <-                             # to add a header in our tibble
+  c(
+    "Scaffold", "SNP", "Cm", "Position", "Allele1", "Allele2"
+  )
+#
+# check the tibble
+head(snps)
+```
+
+Now we can merge it with my_fst3
+
+```{r}
+# Use the separate() function to split the LocusName column
+my_fst4 <- my_fst4 |>
+  separate(LocusName, into = c("SNP_id", "LocusName"), sep = "\\.")
+
+# Merge the data frames
+merged_df <- merge(my_fst4, snps, by.x = "SNP_id", by.y = "SNP")
+
+# Rename the column
+merged_df <- rename(merged_df, Chromosome = Scaffold)
+
+# View the first few rows of the merged data frame
+head(merged_df)
+```
+
+Use ggplot to make a new plot
+```{r}
+# Subset dataframe for He > 0.1
+df_sub <- subset(merged_df, He > 0.1)
+
+# Adjust my_out condition to fit merged_df
+my_out <- P1$SNP_id[P1$OutlierFlag == TRUE]
+
+# Save it
+write.table(
+  my_out,
+  file = here("output", "outflank","SNPs_outFlank.txt"),
+  row.names = FALSE,
+  quote = FALSE,
+  col.names = FALSE,
+  sep = "\n"
+)
+
+# Create a new column in the dataframe to define highlight points based on my_out
+df_sub$highlight <- ifelse(df_sub$SNP_id %in% my_out, TRUE, FALSE)
+
+# source the plotting function
+source(
+  here(
+    "scripts", "analysis", "my_theme2.R"
+  )
+)
+
+# Custom label function
+k_format <- function(x) {
+  paste0(format(x / 1e6, big.mark = "", scientific = FALSE), "k")
+}
+
+# Set colors for the chromosomes
+color_vector <- c("#CCF6D6", "#F6E1CC", "#CCD8F6")  # Add or remove colors as needed.
+names(color_vector) <- unique(df_sub$Chromosome)  # Make sure unique(df_sub$Chromosome) gives all unique Chromosome values.
+
+# Filter data to include only the highest FST value for each chromosome
+highest_FST <- df_sub[which(df_sub$highlight == TRUE), ]
+highest_FST <- highest_FST[which(highest_FST$FST == ave(highest_FST$FST, highest_FST$Chromosome, FUN = max)), ]
+
+# Create the plot
+ggplot(df_sub, aes(x = Position, y = FST)) +
+  geom_point(aes(color = Chromosome),
+             data = subset(df_sub, highlight == FALSE),
+             size = .3) +
+  geom_point(
+    color = "magenta",
+    data = subset(df_sub, highlight == TRUE),
+    size = .3
+  ) +
+  scale_color_manual(values = color_vector, guide = "none") +
+  labs(x = "Position", y = "FST", caption = "") +
+  facet_wrap(~ Chromosome, scales = "free_x") +
+  scale_x_continuous(labels = k_format) +
+  my_theme() +
+  theme(panel.spacing = unit(.2, "lines"),
+        plot.margin = unit(c(1, 1, 2, 2), "lines"),
+        plot.caption = element_markdown(face = "italic", color = "#574E4E")) +
+  # Annotate only the highest highlighted point for each chromosome
+  geom_text_repel(
+    data = highest_FST,
+    aes(label = SNP_id),
+    size = 3,
+    nudge_y = 0.01,
+    segment.color = NA,
+    max.overlaps = Inf # Set to 'Inf' to show all annotations
+  )
+
+# Save the plot
+ggsave(
+  here(
+    "output", "outflank", "figures", "outFlank_outliers.pdf"
+  ),
+  width  = 8,
+  height = 5,
+  units  = "in"
+)
+```
+
+
+## 3. outFLANK with 2 populations (MAN and AUT)
+
+This tool does not directly account for population structure. It instead looks for loci that show a higher Fst than the neutral expectation, under a model of hierarchical population structure. The method is robust to hierarchical population structure and a range of demographic histories.
+
+Check the documentation https://htmlpreview.github.io/?https://github.com/whitlock/OutFLANK/blob/master/inst/doc/OutFLANKAnalysis.html
+
+"OutFLANK is an R package that implements the method developed by Whitlock and Lotterhos (2015) to use likelihood on a trimmed distribution of FST values to infer the distribution of FST for neutral markers. This distribution is then used to assign q-values to each locus to detect outliers that may be due to spatially heterogeneous selection."
+
+Clean env and memory
+```{r}
+# Remove all objects from the environment
+rm(list = ls())
+
+# Run the garbage collector to free up memory
+gc()
+```
+
+
+### 3.1 OutFLANK analysis with quasi-independent set of SNPs
+
+Create vcf with intergenic SNPs that are not linked
+```{bash}
+plink2 \
+--bfile output/outflank/man_aut  \
+--extract output/outflank/indepSNP.prune.in \
+--export vcf \
+--make-bed \
+--out output/outflank/man_aut2 \
+--silent;
+grep 'samples\|variants\|remaining' output/outflank/man_aut2.log
+```
+
+
+We need to import the data
+
+```{r}
+# Read your vcf file
+vcf <- read.vcfR(here("output","outflank","man_aut2.vcf"))
+
+# Extract genotypes
+geno <- vcfR::extract.gt(vcf)
+
+# Extract locus names (positions)
+locusNames <- vcfR::getPOS(vcf)
+
+# Samples
+sampleNames <- colnames(geno)
+
+# Extract population names by splitting the sample names
+# If your sample names contain population information.
+popNames <- sapply(strsplit(sampleNames, "_"), "[", 1)
+
+# Initialize new matrix for transformed genotypes
+G <- matrix(NA, nrow = nrow(geno), ncol = ncol(geno))
+
+# Recode genotypes
+G[geno %in% c("0/0", "0|0")] <- 0
+G[geno %in% c("0/1", "1/0", "1|0", "0|1")] <- 1
+G[geno %in% c("1/1", "1|1")] <- 2
+
+# Replace NA with 9 for missing data
+G <- replace(G, is.na(G), 9)
+
+# Check the counts of each genotype
+table(as.vector(G))
+
+# Extract SNP names
+snpNames <- vcfR::getID(vcf)
+
+# Calculate FST with SNP names
+my_fst <- MakeDiploidFSTMat(t(G), locusNames = snpNames, popNames = popNames)
+
+head(my_fst)
+```
+Check the FST distribution
+```{r}
+# Create the histogram of FST values
+ggplot(my_fst, aes(x=FST)) +
+  geom_histogram(binwidth=0.001, fill="blue", alpha=0.7) +
+  labs(title="Histogram of FST Values",
+       x="FST",
+       y="Frequency") +
+  theme_minimal()
+```
+
+We can select the SNPs with low FST to use as neutral SNPs
+```{r}
+my_fst |>
+  filter(FST < 0.2 & FST >=-0.1) |>
+  dplyr::select(LocusName) -> neutral_snps
+
+length(neutral_snps$LocusName)
+
+write.table(
+  neutral_snps$LocusName,
+  file = here("output", "outflank","man_aut2_SNPs.txt"),
+  row.names = FALSE,
+  quote = FALSE,
+  col.names = FALSE,
+  sep = "\n"
+)
+```
+
+
+Create a vcf 
+```{bash}
+plink2 \
+--bfile output/outflank/man_aut2 \
+--export vcf \
+--extract output/outflank/man_aut2_SNPs.txt \
+--out output/outflank/man_aut3 \
+--silent;
+grep "samples\|variants" output/outflank/man_aut3.log 
+```
+
+Import the data.
+
+```{r}
+# Read your vcf file
+vcf <- read.vcfR(here("output","outflank","man_aut3.vcf"))
+# vcf <- read.vcfR(here("output","outflank","intergenic.vcf"))
+# Extract genotypes
+geno <- vcfR::extract.gt(vcf)
+
+# Extract locus names (positions)
+locusNames <- vcfR::getPOS(vcf)
+
+# Samples
+sampleNames <- colnames(geno)
+
+# Extract population names by splitting the sample names
+# If your sample names contain population information.
+popNames <- sapply(strsplit(sampleNames, "_"), "[", 1)
+
+# Initialize new matrix for transformed genotypes
+G <- matrix(NA, nrow = nrow(geno), ncol = ncol(geno))
+
+# Recode genotypes
+G[geno %in% c("0/0", "0|0")] <- 0
+G[geno %in% c("0/1", "1/0", "1|0", "0|1")] <- 1
+G[geno %in% c("1/1", "1|1")] <- 2
+
+# Replace NA with 9 for missing data
+G <- replace(G, is.na(G), 9)
+
+# Check the counts of each genotype
+table(as.vector(G))
+
+# Extract SNP names
+snpNames <- vcfR::getID(vcf)
+
+# Calculate FST with SNP names
+my_fst <- MakeDiploidFSTMat(t(G), locusNames = snpNames, popNames = popNames)
+
+head(my_fst)
+```
+Check the FST distribution
+```{r}
+# Create the histogram of FST values
+ggplot(my_fst, aes(x=FST)) +
+  geom_histogram(binwidth=0.001, fill="blue", alpha=0.7) +
+  labs(title="Histogram of FST Values",
+       x="FST",
+       y="Frequency") +
+  theme_minimal()
+```
+
+
+Data prep: decide which SNPs to use for calibrating the null distribution of Fst
+
+```{r}
+# Run OutFLANK to estimate the neutral FST distribution
+out_trim <- OutFLANK(FstDataFrame = my_fst, Hmin = 0.1, NumberOfSamples = 60, qthreshold = 0.05)
+str(out_trim)
+```
+Check the fit and make sure it looks good, especially in the right tail:
+```{r}
+OutFLANKResultsPlotter(
+  out_trim,
+  withOutliers = TRUE,
+  NoCorr = TRUE,
+  Hmin = 0.1,
+  binwidth = 0.001,
+  Zoom = FALSE,
+  RightZoomFraction = 0.05,
+  titletext = NULL
+)
+```
+
+
+```{r}
+## Zoom in on right tail
+OutFLANKResultsPlotter(
+  out_trim ,
+  withOutliers = TRUE,
+  NoCorr = TRUE,
+  Hmin = 0.1,
+  binwidth = 0.001,
+  Zoom =
+    TRUE,
+  RightZoomFraction = 0.05,
+  titletext = NULL
+)
+```
+
+
+```{r}
+plot(my_fst$FST, my_fst$FSTNoCorr)
+abline(0,1)
+```
+
+
+Also check the P-value histogram:
+Here, we plot the “right-tailed” P-values, which means that outliers in the right tail of the FST distribution will have a P-value near zero. Because we ran the algorithm on a trimmed set of SNPs, this will remove some of the signal around selected sites. So we expect this histogram to be flat and maybe have a bump near 0 for selected sites. This histogram looks pretty good.
+
+```{r}
+hist(out_trim$results$pvaluesRightTail)
+```
+
+
+
+
+### 3.2 Using estimated neutral mean FST and df to calculate P-values for all loci
+
+Now that we’ve estimated neutral mean FST and df to a quasi-independent set of SNPs, we can go and calculate P-values and q-values for all the loci in our dataset before prunning.
+
+Note that it is important to run this code with the uncorrected FSTs (FSTNoCorr) and the uncorrected mean FST (FSTNoCorrbar).
+
+Now we can use the entire data set to estimate the fst
+
+Create a vcf - ld pruned data
+```{bash}
+plink2 \
+--bfile output/outflank/man_aut \
+--export vcf \
+--make-bed \
+--out output/outflank/man_aut4 \
+--silent;
+grep "samples\|variants" output/outflank/man_aut4.log 
+```
+
+Import the data
+
+```{r}
+# Read your vcf file
+vcf2 <- read.vcfR(here("output","outflank","man_aut4.vcf"))
+
+
+# Extract genotypes
+geno2 <- vcfR::extract.gt(vcf2)
+
+# Extract locus names (positions)
+locusNames2 <- vcfR::getPOS(vcf2)
+
+# Samples
+sampleNames2 <- colnames(geno2)
+
+# Extract population names by splitting the sample names
+# If your sample names contain population information.
+popNames2 <- sapply(strsplit(sampleNames2, "_"), "[", 1)
+
+# Initialize new matrix for transformed genotypes
+H <- matrix(NA, nrow = nrow(geno2), ncol = ncol(geno2))
+
+# Recode genotypes
+H[geno2 %in% c("0/0", "0|0")] <- 0
+H[geno2 %in% c("0/1", "1/0", "1|0", "0|1")] <- 1
+H[geno2 %in% c("1/1", "1|1")] <- 2
+
+# Replace NA with 9 for missing data
+H <- replace(H, is.na(H), 9)
+
+# Check the counts of each genotype
+table(as.vector(H))
+
+# Extract SNP names
+snpNames <- vcfR::getID(vcf2)
+
+# Use the option below for names if you want to make the plot without having to add the postion later on
+locusNames2 <- vcfR::getPOS(vcf2)
+
+# Calculate FST
+my_fst2 <- MakeDiploidFSTMat(t(H), locusNames = locusNames2, popNames = popNames2)
+my_fst3 <- MakeDiploidFSTMat(t(H), locusNames = snpNames, popNames = popNames2) # with SNP id instead of position
+
+# Concatenate the SNP names and the SNP positions
+locusNames3 <- paste(snpNames, locusNames2, sep = ".")
+
+# Calculate FST with the combined names
+my_fst4 <- MakeDiploidFSTMat(t(H), locusNames = locusNames3, popNames = popNames2)
+
+# Check output
+head(my_fst2)
+head(my_fst3)
+head(my_fst4)
+```
+
+Data checks: Heterozygosity vs. FST
+Here, you can see how some of the low H loci have high FST. These are all neutral loci in the simulation, and it is important to exclude them from the OutFLANK algorithm.
+
+Note that it is important to run this code with the uncorrected FSTs (FSTNoCorr) and the uncorrected mean FST (FSTNoCorrbar).
+
+```{r}
+P1 <-
+  pOutlierFinderChiSqNoCorr(
+    my_fst4,
+    Fstbar = out_trim$FSTNoCorrbar,
+    dfInferred = out_trim$dfInferred,
+    qthreshold = 0.05,
+    Hmin = 0.1
+  )
+head(P1)
+```
+
+
+```{r}
+tail(P1)
+```
+
+```{r}
+# notice how the output is ordered differently
+my_out <- P1$OutlierFlag==TRUE
+plot(P1$He, P1$FST, pch=19, col=rgb(0,0,0,0.1))
+points(P1$He[my_out], P1$FST[my_out], col="blue")
+# check the P-value histogram for the full set of data
+# if there are outliers, it should look flat with an inflation near 0
+```
+
+```{r}
+hist(P1$pvaluesRightTail)
+```
+
+Highlight outliers on Manhattan Plot
+
+For publication, we want to show the accurate estimate of FST, not the uncorrected estimate. Remember to exclude those low H loci!
+
+```{r}
+# Use the separate() function to split the LocusName column
+P1 <- P1 |>
+  separate(LocusName, into = c("SNP_id", "LocusName"), sep = "\\.")
+
+# Create plot
+plot(P1$LocusName[P1$He>0.1], P1$FST[P1$He>0.1],
+     xlab="Position", ylab="FST", col=rgb(0,0,0,0.2))
+  points(P1$LocusName[my_out], P1$FST[my_out], col="magenta", pch=20)  
+```
+output/local_adaptation/file3
+We can use our bim file to create a plot with the chromosomal ids
+```{r}
+#   ____________________________________________________________________________
+#   import the bim file with the SNP data                                   ####
+snps <-
+  read_delim(                    # to learn about the options use here, run ?read_delim on the console.
+    here(
+      "output", "outflank", "man_aut.bim"
+    ),                           # use library here to load it
+    col_names      = FALSE,      # we don't have header in the input file
+    show_col_types = FALSE,      # suppress message from read_delim
+    col_types      = "ccidcc"    # set the class of each column
+  )
+#
+# set column names
+colnames(
+  snps
+) <-                             # to add a header in our tibble
+  c(
+    "Scaffold", "SNP", "Cm", "Position", "Allele1", "Allele2"
+  )
+#
+# check the tibble
+head(snps)
+```
+
+Now we can merge it with my_fst3
+
+```{r}
+# Use the separate() function to split the LocusName column
+my_fst4 <- my_fst4 |>
+  separate(LocusName, into = c("SNP_id", "LocusName"), sep = "\\.")
+
+# Merge the data frames
+merged_df <- merge(my_fst4, snps, by.x = "SNP_id", by.y = "SNP")
+
+# Rename the column
+merged_df <- rename(merged_df, Chromosome = Scaffold)
+
+# View the first few rows of the merged data frame
+head(merged_df)
+```
+
+Use ggplot to make a new plot
+```{r}
+# Subset dataframe for He > 0.1
+df_sub <- subset(merged_df, He > 0.1)
+
+# Adjust my_out condition to fit merged_df
+my_out <- P1$SNP_id[P1$OutlierFlag == TRUE]
+
+# Save it
+write.table(
+  my_out,
+  file = here("output", "outflank","man_aut_SNPs_outFlank.txt"),
+  row.names = FALSE,
+  quote = FALSE,
+  col.names = FALSE,
+  sep = "\n"
+)
+
+# Create a new column in the dataframe to define highlight points based on my_out
+df_sub$highlight <- ifelse(df_sub$SNP_id %in% my_out, TRUE, FALSE)
+
+# source the plotting function
+source(
+  here(
+    "scripts", "analysis", "my_theme2.R"
+  )
+)
+
+# Custom label function
+k_format <- function(x) {
+  paste0(format(x / 1e6, big.mark = "", scientific = FALSE), "k")
+}
+
+# Set colors for the chromosomes
+color_vector <- c("#CCF6D6", "#F6E1CC", "#CCD8F6")  # Add or remove colors as needed.
+names(color_vector) <- unique(df_sub$Chromosome)  # Make sure unique(df_sub$Chromosome) gives all unique Chromosome values.
+
+# Filter data to include only the highest FST value for each chromosome
+highest_FST <- df_sub[which(df_sub$highlight == TRUE), ]
+highest_FST <- highest_FST[which(highest_FST$FST == ave(highest_FST$FST, highest_FST$Chromosome, FUN = max)), ]
+
+# Create the plot
+ggplot(df_sub, aes(x = Position, y = FST)) +
+  geom_point(aes(color = Chromosome),
+             data = subset(df_sub, highlight == FALSE),
+             size = .3) +
+  geom_point(
+    color = "magenta",
+    data = subset(df_sub, highlight == TRUE),
+    size = .3
+  ) +
+  scale_color_manual(values = color_vector, guide = "none") +
+  labs(x = "Position", y = "FST", caption = "") +
+  facet_wrap(~ Chromosome, scales = "free_x") +
+  scale_x_continuous(labels = k_format) +
+  my_theme() +
+  theme(panel.spacing = unit(.2, "lines"),
+        plot.margin = unit(c(1, 1, 2, 2), "lines"),
+        plot.caption = element_markdown(face = "italic", color = "#574E4E")) +
+  # Annotate only the highest highlighted point for each chromosome
+  geom_text_repel(
+    data = highest_FST,
+    aes(label = SNP_id),
+    size = 3,
+    nudge_y = 0.01,
+    segment.color = NA,
+    max.overlaps = Inf # Set to 'Inf' to show all annotations
+  )
+
+# Save the plot
+ggsave(
+  here(
+    "output", "outflank", "figures", "man_aut_outFlank_outliers.pdf"
+  ),
+  width  = 8,
+  height = 5,
+  units  = "in"
+)
+```
+
+
+
+
+
+
+
+
+## 4. outFLANK with 2 populations (NEW and AUT)
+
+This tool does not directly account for population structure. It instead looks for loci that show a higher Fst than the neutral expectation, under a model of hierarchical population structure. The method is robust to hierarchical population structure and a range of demographic histories.
+
+Check the documentation https://htmlpreview.github.io/?https://github.com/whitlock/OutFLANK/blob/master/inst/doc/OutFLANKAnalysis.html
+
+"OutFLANK is an R package that implements the method developed by Whitlock and Lotterhos (2015) to use likelihood on a trimmed distribution of FST values to infer the distribution of FST for neutral markers. This distribution is then used to assign q-values to each locus to detect outliers that may be due to spatially heterogeneous selection."
+
+Clean env and memory
+```{r}
+# Remove all objects from the environment
+rm(list = ls())
+
+# Run the garbage collector to free up memory
+gc()
+```
+
+
+### 4.1 OutFLANK analysis with quasi-independent set of SNPs
+
+Create vcf with intergenic SNPs that are not linked
+```{bash}
+plink2 \
+--bfile output/outflank/new_aut  \
+--extract output/outflank/indepSNP.prune.in \
+--export vcf \
+--make-bed \
+--out output/outflank/new_aut2 \
+--silent;
+grep 'samples\|variants\|remaining' output/outflank/new_aut2.log
+```
+
+
+We need to import the data
+
+```{r}
+# Read your vcf file
+vcf <- read.vcfR(here("output","outflank","new_aut2.vcf"))
+
+# Extract genotypes
+geno <- vcfR::extract.gt(vcf)
+
+# Extract locus names (positions)
+locusNames <- vcfR::getPOS(vcf)
+
+# Samples
+sampleNames <- colnames(geno)
+
+# Extract population names by splitting the sample names
+# If your sample names contain population information.
+popNames <- sapply(strsplit(sampleNames, "_"), "[", 1)
+
+# Initialize new matrix for transformed genotypes
+G <- matrix(NA, nrow = nrow(geno), ncol = ncol(geno))
+
+# Recode genotypes
+G[geno %in% c("0/0", "0|0")] <- 0
+G[geno %in% c("0/1", "1/0", "1|0", "0|1")] <- 1
+G[geno %in% c("1/1", "1|1")] <- 2
+
+# Replace NA with 9 for missing data
+G <- replace(G, is.na(G), 9)
+
+# Check the counts of each genotype
+table(as.vector(G))
+
+# Extract SNP names
+snpNames <- vcfR::getID(vcf)
+
+# Calculate FST with SNP names
+my_fst <- MakeDiploidFSTMat(t(G), locusNames = snpNames, popNames = popNames)
+
+head(my_fst)
+```
+Check the FST distribution
+```{r}
+# Create the histogram of FST values
+ggplot(my_fst, aes(x=FST)) +
+  geom_histogram(binwidth=0.001, fill="blue", alpha=0.7) +
+  labs(title="Histogram of FST Values",
+       x="FST",
+       y="Frequency") +
+  theme_minimal()
+```
+
+We can select the SNPs with low FST to use as neutral SNPs
+```{r}
+my_fst |>
+  filter(FST < 0.2 & FST >=-0.1) |>
+  dplyr::select(LocusName) -> neutral_snps
+
+length(neutral_snps$LocusName)
+
+write.table(
+  neutral_snps$LocusName,
+  file = here("output", "outflank","new_aut2_SNPs.txt"),
+  row.names = FALSE,
+  quote = FALSE,
+  col.names = FALSE,
+  sep = "\n"
+)
+```
+
+
+Create a vcf 
+```{bash}
+plink2 \
+--bfile output/outflank/new_aut2 \
+--export vcf \
+--extract output/outflank/new_aut2_SNPs.txt \
+--out output/outflank/new_aut3 \
+--silent;
+grep "samples\|variants" output/outflank/new_aut3.log 
+```
+
+Import the data.
+
+```{r}
+# Read your vcf file
+vcf <- read.vcfR(here("output","outflank","new_aut3.vcf"))
+# vcf <- read.vcfR(here("output","outflank","intergenic.vcf"))
+# Extract genotypes
+geno <- vcfR::extract.gt(vcf)
+
+# Extract locus names (positions)
+locusNames <- vcfR::getPOS(vcf)
+
+# Samples
+sampleNames <- colnames(geno)
+
+# Extract population names by splitting the sample names
+# If your sample names contain population information.
+popNames <- sapply(strsplit(sampleNames, "_"), "[", 1)
+
+# Initialize new matrix for transformed genotypes
+G <- matrix(NA, nrow = nrow(geno), ncol = ncol(geno))
+
+# Recode genotypes
+G[geno %in% c("0/0", "0|0")] <- 0
+G[geno %in% c("0/1", "1/0", "1|0", "0|1")] <- 1
+G[geno %in% c("1/1", "1|1")] <- 2
+
+# Replace NA with 9 for missing data
+G <- replace(G, is.na(G), 9)
+
+# Check the counts of each genotype
+table(as.vector(G))
+
+# Extract SNP names
+snpNames <- vcfR::getID(vcf)
+
+# Calculate FST with SNP names
+my_fst <- MakeDiploidFSTMat(t(G), locusNames = snpNames, popNames = popNames)
+
+head(my_fst)
+```
+Check the FST distribution
+```{r}
+# Create the histogram of FST values
+ggplot(my_fst, aes(x=FST)) +
+  geom_histogram(binwidth=0.001, fill="blue", alpha=0.7) +
+  labs(title="Histogram of FST Values",
+       x="FST",
+       y="Frequency") +
+  theme_minimal()
+```
+
+
+Data prep: decide which SNPs to use for calibrating the null distribution of Fst
+
+```{r}
+# Run OutFLANK to estimate the neutral FST distribution
+out_trim <- OutFLANK(FstDataFrame = my_fst, Hmin = 0.1, NumberOfSamples = 60, qthreshold = 0.05)
+str(out_trim)
+```
+Check the fit and make sure it looks good, especially in the right tail:
+```{r}
+OutFLANKResultsPlotter(
+  out_trim,
+  withOutliers = TRUE,
+  NoCorr = TRUE,
+  Hmin = 0.1,
+  binwidth = 0.001,
+  Zoom = FALSE,
+  RightZoomFraction = 0.05,
+  titletext = NULL
+)
+```
+
+
+```{r}
+## Zoom in on right tail
+OutFLANKResultsPlotter(
+  out_trim ,
+  withOutliers = TRUE,
+  NoCorr = TRUE,
+  Hmin = 0.1,
+  binwidth = 0.001,
+  Zoom =
+    TRUE,
+  RightZoomFraction = 0.05,
+  titletext = NULL
+)
+```
+
+
+```{r}
+plot(my_fst$FST, my_fst$FSTNoCorr)
+abline(0,1)
+```
+
+
+Also check the P-value histogram:
+Here, we plot the “right-tailed” P-values, which means that outliers in the right tail of the FST distribution will have a P-value near zero. Because we ran the algorithm on a trimmed set of SNPs, this will remove some of the signal around selected sites. So we expect this histogram to be flat and maybe have a bump near 0 for selected sites. This histogram looks pretty good.
+
+```{r}
+hist(out_trim$results$pvaluesRightTail)
+```
+
+
+
+
+### 4.2 Using estimated neutral mean FST and df to calculate P-values for all loci
+
+Now that we’ve estimated neutral mean FST and df to a quasi-independent set of SNPs, we can go and calculate P-values and q-values for all the loci in our dataset before prunning.
+
+Note that it is important to run this code with the uncorrected FSTs (FSTNoCorr) and the uncorrected mean FST (FSTNoCorrbar).
+
+Now we can use the entire data set to estimate the fst
+
+Create a vcf - ld pruned data
+```{bash}
+plink2 \
+--bfile output/outflank/new_aut \
+--export vcf \
+--make-bed \
+--out output/outflank/new_aut4 \
+--silent;
+grep "samples\|variants" output/outflank/new_aut4.log 
+```
+
+Import the data
+
+```{r}
+# Read your vcf file
+vcf2 <- read.vcfR(here("output","outflank","new_aut4.vcf"))
+
+
+# Extract genotypes
+geno2 <- vcfR::extract.gt(vcf2)
+
+# Extract locus names (positions)
+locusNames2 <- vcfR::getPOS(vcf2)
+
+# Samples
+sampleNames2 <- colnames(geno2)
+
+# Extract population names by splitting the sample names
+# If your sample names contain population information.
+popNames2 <- sapply(strsplit(sampleNames2, "_"), "[", 1)
+
+# Initialize new matrix for transformed genotypes
+H <- matrix(NA, nrow = nrow(geno2), ncol = ncol(geno2))
+
+# Recode genotypes
+H[geno2 %in% c("0/0", "0|0")] <- 0
+H[geno2 %in% c("0/1", "1/0", "1|0", "0|1")] <- 1
+H[geno2 %in% c("1/1", "1|1")] <- 2
+
+# Replace NA with 9 for missing data
+H <- replace(H, is.na(H), 9)
+
+# Check the counts of each genotype
+table(as.vector(H))
+
+# Extract SNP names
+snpNames <- vcfR::getID(vcf2)
+
+# Use the option below for names if you want to make the plot without having to add the postion later on
+locusNames2 <- vcfR::getPOS(vcf2)
+
+# Calculate FST
+my_fst2 <- MakeDiploidFSTMat(t(H), locusNames = locusNames2, popNames = popNames2)
+my_fst3 <- MakeDiploidFSTMat(t(H), locusNames = snpNames, popNames = popNames2) # with SNP id instead of position
+
+# Concatenate the SNP names and the SNP positions
+locusNames3 <- paste(snpNames, locusNames2, sep = ".")
+
+# Calculate FST with the combined names
+my_fst4 <- MakeDiploidFSTMat(t(H), locusNames = locusNames3, popNames = popNames2)
+
+# Check output
+head(my_fst2)
+head(my_fst3)
+head(my_fst4)
+```
+
+Data checks: Heterozygosity vs. FST
+Here, you can see how some of the low H loci have high FST. These are all neutral loci in the simulation, and it is important to exclude them from the OutFLANK algorithm.
+
+Note that it is important to run this code with the uncorrected FSTs (FSTNoCorr) and the uncorrected mean FST (FSTNoCorrbar).
+
+```{r}
+P1 <-
+  pOutlierFinderChiSqNoCorr(
+    my_fst4,
+    Fstbar = out_trim$FSTNoCorrbar,
+    dfInferred = out_trim$dfInferred,
+    qthreshold = 0.05,
+    Hmin = 0.1
+  )
+head(P1)
+```
+
+
+```{r}
+tail(P1)
+```
+
+```{r}
+# notice how the output is ordered differently
+my_out <- P1$OutlierFlag==TRUE
+plot(P1$He, P1$FST, pch=19, col=rgb(0,0,0,0.1))
+points(P1$He[my_out], P1$FST[my_out], col="blue")
+# check the P-value histogram for the full set of data
+# if there are outliers, it should look flat with an inflation near 0
+```
+
+```{r}
+hist(P1$pvaluesRightTail)
+```
+
+Highlight outliers on Manhattan Plot
+
+For publication, we want to show the accurate estimate of FST, not the uncorrected estimate. Remember to exclude those low H loci!
+
+```{r}
+# Use the separate() function to split the LocusName column
+P1 <- P1 |>
+  separate(LocusName, into = c("SNP_id", "LocusName"), sep = "\\.")
+
+# Create plot
+plot(P1$LocusName[P1$He>0.1], P1$FST[P1$He>0.1],
+     xlab="Position", ylab="FST", col=rgb(0,0,0,0.2))
+  points(P1$LocusName[my_out], P1$FST[my_out], col="magenta", pch=20)  
+```
+output/local_adaptation/file3
+We can use our bim file to create a plot with the chromosomal ids
+```{r}
+#   ____________________________________________________________________________
+#   import the bim file with the SNP data                                   ####
+snps <-
+  read_delim(                    # to learn about the options use here, run ?read_delim on the console.
+    here(
+      "output", "outflank", "man_aut.bim"
+    ),                           # use library here to load it
+    col_names      = FALSE,      # we don't have header in the input file
+    show_col_types = FALSE,      # suppress message from read_delim
+    col_types      = "ccidcc"    # set the class of each column
+  )
+#
+# set column names
+colnames(
+  snps
+) <-                             # to add a header in our tibble
+  c(
+    "Scaffold", "SNP", "Cm", "Position", "Allele1", "Allele2"
+  )
+#
+# check the tibble
+head(snps)
+```
+
+Now we can merge it with my_fst3
+
+```{r}
+# Use the separate() function to split the LocusName column
+my_fst4 <- my_fst4 |>
+  separate(LocusName, into = c("SNP_id", "LocusName"), sep = "\\.")
+
+# Merge the data frames
+merged_df <- merge(my_fst4, snps, by.x = "SNP_id", by.y = "SNP")
+
+# Rename the column
+merged_df <- rename(merged_df, Chromosome = Scaffold)
+
+# View the first few rows of the merged data frame
+head(merged_df)
+```
+
+Use ggplot to make a new plot
+```{r}
+# Subset dataframe for He > 0.1
+df_sub <- subset(merged_df, He > 0.1)
+
+# Adjust my_out condition to fit merged_df
+my_out <- P1$SNP_id[P1$OutlierFlag == TRUE]
+
+# Save it
+write.table(
+  my_out,
+  file = here("output", "outflank","new_aut_SNPs_outFlank.txt"),
+  row.names = FALSE,
+  quote = FALSE,
+  col.names = FALSE,
+  sep = "\n"
+)
+
+# Create a new column in the dataframe to define highlight points based on my_out
+df_sub$highlight <- ifelse(df_sub$SNP_id %in% my_out, TRUE, FALSE)
+
+# source the plotting function
+source(
+  here(
+    "scripts", "analysis", "my_theme2.R"
+  )
+)
+
+# Custom label function
+k_format <- function(x) {
+  paste0(format(x / 1e6, big.mark = "", scientific = FALSE), "k")
+}
+
+# Set colors for the chromosomes
+color_vector <- c("#CCF6D6", "#F6E1CC", "#CCD8F6")  # Add or remove colors as needed.
+names(color_vector) <- unique(df_sub$Chromosome)  # Make sure unique(df_sub$Chromosome) gives all unique Chromosome values.
+
+# Filter data to include only the highest FST value for each chromosome
+highest_FST <- df_sub[which(df_sub$highlight == TRUE), ]
+highest_FST <- highest_FST[which(highest_FST$FST == ave(highest_FST$FST, highest_FST$Chromosome, FUN = max)), ]
+
+# Create the plot
+ggplot(df_sub, aes(x = Position, y = FST)) +
+  geom_point(aes(color = Chromosome),
+             data = subset(df_sub, highlight == FALSE),
+             size = .3) +
+  geom_point(
+    color = "magenta",
+    data = subset(df_sub, highlight == TRUE),
+    size = .3
+  ) +
+  scale_color_manual(values = color_vector, guide = "none") +
+  labs(x = "Position", y = "FST", caption = "") +
+  facet_wrap(~ Chromosome, scales = "free_x") +
+  scale_x_continuous(labels = k_format) +
+  my_theme() +
+  theme(panel.spacing = unit(.2, "lines"),
+        plot.margin = unit(c(1, 1, 2, 2), "lines"),
+        plot.caption = element_markdown(face = "italic", color = "#574E4E")) +
+  # Annotate only the highest highlighted point for each chromosome
+  geom_text_repel(
+    data = highest_FST,
+    aes(label = SNP_id),
+    size = 3,
+    nudge_y = 0.01,
+    segment.color = NA,
+    max.overlaps = Inf # Set to 'Inf' to show all annotations
+  )
+
+# Save the plot
+ggsave(
+  here(
+    "output", "outflank", "figures", "new_aut_outFlank_outliers.pdf"
+  ),
+  width  = 8,
+  height = 5,
+  units  = "in"
+)
+```
+
+
+
+
+
+
+
+
+## 5. outFLANK with 2 populations (MAN and NEW)
+
+This tool does not directly account for population structure. It instead looks for loci that show a higher Fst than the neutral expectation, under a model of hierarchical population structure. The method is robust to hierarchical population structure and a range of demographic histories.
+
+Check the documentation https://htmlpreview.github.io/?https://github.com/whitlock/OutFLANK/blob/master/inst/doc/OutFLANKAnalysis.html
+
+"OutFLANK is an R package that implements the method developed by Whitlock and Lotterhos (2015) to use likelihood on a trimmed distribution of FST values to infer the distribution of FST for neutral markers. This distribution is then used to assign q-values to each locus to detect outliers that may be due to spatially heterogeneous selection."
+
+Clean env and memory
+```{r}
+# Remove all objects from the environment
+rm(list = ls())
+
+# Run the garbage collector to free up memory
+gc()
+```
+
+
+### 5.1 OutFLANK analysis with quasi-independent set of SNPs
+
+Create vcf with intergenic SNPs that are not linked
+```{bash}
+plink2 \
+--bfile output/outflank/man_new  \
+--extract output/outflank/indepSNP.prune.in \
+--export vcf \
+--make-bed \
+--out output/outflank/man_new2 \
+--silent;
+grep 'samples\|variants\|remaining' output/outflank/man_new2.log
+```
+
+
+We need to import the data
+
+```{r}
+# Read your vcf file
+vcf <- read.vcfR(here("output","outflank","man_new2.vcf"))
+
+# Extract genotypes
+geno <- vcfR::extract.gt(vcf)
+
+# Extract locus names (positions)
+locusNames <- vcfR::getPOS(vcf)
+
+# Samples
+sampleNames <- colnames(geno)
+
+# Extract population names by splitting the sample names
+# If your sample names contain population information.
+popNames <- sapply(strsplit(sampleNames, "_"), "[", 1)
+
+# Initialize new matrix for transformed genotypes
+G <- matrix(NA, nrow = nrow(geno), ncol = ncol(geno))
+
+# Recode genotypes
+G[geno %in% c("0/0", "0|0")] <- 0
+G[geno %in% c("0/1", "1/0", "1|0", "0|1")] <- 1
+G[geno %in% c("1/1", "1|1")] <- 2
+
+# Replace NA with 9 for missing data
+G <- replace(G, is.na(G), 9)
+
+# Check the counts of each genotype
+table(as.vector(G))
+
+# Extract SNP names
+snpNames <- vcfR::getID(vcf)
+
+# Calculate FST with SNP names
+my_fst <- MakeDiploidFSTMat(t(G), locusNames = snpNames, popNames = popNames)
+
+head(my_fst)
+```
+Check the FST distribution
+```{r}
+# Create the histogram of FST values
+ggplot(my_fst, aes(x=FST)) +
+  geom_histogram(binwidth=0.001, fill="blue", alpha=0.7) +
+  labs(title="Histogram of FST Values",
+       x="FST",
+       y="Frequency") +
+  theme_minimal()
+```
+
+We can select the SNPs with low FST to use as neutral SNPs
+```{r}
+my_fst |>
+  filter(FST < 0.2 & FST >=-0.1) |>
+  dplyr::select(LocusName) -> neutral_snps
+
+length(neutral_snps$LocusName)
+
+write.table(
+  neutral_snps$LocusName,
+  file = here("output", "outflank","man_new2_SNPs.txt"),
+  row.names = FALSE,
+  quote = FALSE,
+  col.names = FALSE,
+  sep = "\n"
+)
+```
+
+
+Create a vcf 
+```{bash}
+plink2 \
+--bfile output/outflank/man_new2 \
+--export vcf \
+--extract output/outflank/new_aut2_SNPs.txt \
+--out output/outflank/man_new3 \
+--silent;
+grep "samples\|variants" output/outflank/man_new3.log 
+```
+
+Import the data.
+
+```{r}
+# Read your vcf file
+vcf <- read.vcfR(here("output","outflank","man_new3.vcf"))
+# vcf <- read.vcfR(here("output","outflank","intergenic.vcf"))
+# Extract genotypes
+geno <- vcfR::extract.gt(vcf)
+
+# Extract locus names (positions)
+locusNames <- vcfR::getPOS(vcf)
+
+# Samples
+sampleNames <- colnames(geno)
+
+# Extract population names by splitting the sample names
+# If your sample names contain population information.
+popNames <- sapply(strsplit(sampleNames, "_"), "[", 1)
+
+# Initialize new matrix for transformed genotypes
+G <- matrix(NA, nrow = nrow(geno), ncol = ncol(geno))
+
+# Recode genotypes
+G[geno %in% c("0/0", "0|0")] <- 0
+G[geno %in% c("0/1", "1/0", "1|0", "0|1")] <- 1
+G[geno %in% c("1/1", "1|1")] <- 2
+
+# Replace NA with 9 for missing data
+G <- replace(G, is.na(G), 9)
+
+# Check the counts of each genotype
+table(as.vector(G))
+
+# Extract SNP names
+snpNames <- vcfR::getID(vcf)
+
+# Calculate FST with SNP names
+my_fst <- MakeDiploidFSTMat(t(G), locusNames = snpNames, popNames = popNames)
+
+head(my_fst)
+```
+Check the FST distribution
+```{r}
+# Create the histogram of FST values
+ggplot(my_fst, aes(x=FST)) +
+  geom_histogram(binwidth=0.001, fill="blue", alpha=0.7) +
+  labs(title="Histogram of FST Values",
+       x="FST",
+       y="Frequency") +
+  theme_minimal()
+```
+
+
+Data prep: decide which SNPs to use for calibrating the null distribution of Fst
+
+```{r}
+# Run OutFLANK to estimate the neutral FST distribution
+out_trim <- OutFLANK(FstDataFrame = my_fst, Hmin = 0.1, NumberOfSamples = 60, qthreshold = 0.05)
+str(out_trim)
+```
+Check the fit and make sure it looks good, especially in the right tail:
+```{r}
+OutFLANKResultsPlotter(
+  out_trim,
+  withOutliers = TRUE,
+  NoCorr = TRUE,
+  Hmin = 0.1,
+  binwidth = 0.001,
+  Zoom = FALSE,
+  RightZoomFraction = 0.05,
+  titletext = NULL
+)
+```
+
+
+```{r}
+## Zoom in on right tail
+OutFLANKResultsPlotter(
+  out_trim ,
+  withOutliers = TRUE,
+  NoCorr = TRUE,
+  Hmin = 0.1,
+  binwidth = 0.001,
+  Zoom =
+    TRUE,
+  RightZoomFraction = 0.05,
+  titletext = NULL
+)
+```
+
+
+```{r}
+plot(my_fst$FST, my_fst$FSTNoCorr)
+abline(0,1)
+```
+
+
+Also check the P-value histogram:
+Here, we plot the “right-tailed” P-values, which means that outliers in the right tail of the FST distribution will have a P-value near zero. Because we ran the algorithm on a trimmed set of SNPs, this will remove some of the signal around selected sites. So we expect this histogram to be flat and maybe have a bump near 0 for selected sites. This histogram looks pretty good.
+
+```{r}
+hist(out_trim$results$pvaluesRightTail)
+```
+
+
+
+
+### 5.2 Using estimated neutral mean FST and df to calculate P-values for all loci
+
+Now that we’ve estimated neutral mean FST and df to a quasi-independent set of SNPs, we can go and calculate P-values and q-values for all the loci in our dataset before prunning.
+
+Note that it is important to run this code with the uncorrected FSTs (FSTNoCorr) and the uncorrected mean FST (FSTNoCorrbar).
+
+Now we can use the entire data set to estimate the fst
+
+Create a vcf - ld pruned data
+```{bash}
+plink2 \
+--bfile output/outflank/man_new \
+--export vcf \
+--make-bed \
+--out output/outflank/man_new4 \
+--silent;
+grep "samples\|variants" output/outflank/man_new4.log 
+```
+
+Import the data
+
+```{r}
+# Read your vcf file
+vcf2 <- read.vcfR(here("output","outflank","man_new4.vcf"))
+
+
+# Extract genotypes
+geno2 <- vcfR::extract.gt(vcf2)
+
+# Extract locus names (positions)
+locusNames2 <- vcfR::getPOS(vcf2)
+
+# Samples
+sampleNames2 <- colnames(geno2)
+
+# Extract population names by splitting the sample names
+# If your sample names contain population information.
+popNames2 <- sapply(strsplit(sampleNames2, "_"), "[", 1)
+
+# Initialize new matrix for transformed genotypes
+H <- matrix(NA, nrow = nrow(geno2), ncol = ncol(geno2))
+
+# Recode genotypes
+H[geno2 %in% c("0/0", "0|0")] <- 0
+H[geno2 %in% c("0/1", "1/0", "1|0", "0|1")] <- 1
+H[geno2 %in% c("1/1", "1|1")] <- 2
+
+# Replace NA with 9 for missing data
+H <- replace(H, is.na(H), 9)
+
+# Check the counts of each genotype
+table(as.vector(H))
+
+# Extract SNP names
+snpNames <- vcfR::getID(vcf2)
+
+# Use the option below for names if you want to make the plot without having to add the postion later on
+locusNames2 <- vcfR::getPOS(vcf2)
+
+# Calculate FST
+my_fst2 <- MakeDiploidFSTMat(t(H), locusNames = locusNames2, popNames = popNames2)
+my_fst3 <- MakeDiploidFSTMat(t(H), locusNames = snpNames, popNames = popNames2) # with SNP id instead of position
+
+# Concatenate the SNP names and the SNP positions
+locusNames3 <- paste(snpNames, locusNames2, sep = ".")
+
+# Calculate FST with the combined names
+my_fst4 <- MakeDiploidFSTMat(t(H), locusNames = locusNames3, popNames = popNames2)
+
+# Check output
+head(my_fst2)
+head(my_fst3)
+head(my_fst4)
+```
+
+Data checks: Heterozygosity vs. FST
+Here, you can see how some of the low H loci have high FST. These are all neutral loci in the simulation, and it is important to exclude them from the OutFLANK algorithm.
+
+Note that it is important to run this code with the uncorrected FSTs (FSTNoCorr) and the uncorrected mean FST (FSTNoCorrbar).
+
+```{r}
+P1 <-
+  pOutlierFinderChiSqNoCorr(
+    my_fst4,
+    Fstbar = out_trim$FSTNoCorrbar,
+    dfInferred = out_trim$dfInferred,
+    qthreshold = 0.05,
+    Hmin = 0.1
+  )
+head(P1)
+```
+
+
+```{r}
+tail(P1)
+```
+
+```{r}
+# notice how the output is ordered differently
+my_out <- P1$OutlierFlag==TRUE
+plot(P1$He, P1$FST, pch=19, col=rgb(0,0,0,0.1))
+points(P1$He[my_out], P1$FST[my_out], col="blue")
+# check the P-value histogram for the full set of data
+# if there are outliers, it should look flat with an inflation near 0
+```
+
+```{r}
+hist(P1$pvaluesRightTail)
+```
+
+Highlight outliers on Manhattan Plot
+
+For publication, we want to show the accurate estimate of FST, not the uncorrected estimate. Remember to exclude those low H loci!
+
+```{r}
+# Use the separate() function to split the LocusName column
+P1 <- P1 |>
+  separate(LocusName, into = c("SNP_id", "LocusName"), sep = "\\.")
+
+# Create plot
+plot(P1$LocusName[P1$He>0.1], P1$FST[P1$He>0.1],
+     xlab="Position", ylab="FST", col=rgb(0,0,0,0.2))
+  points(P1$LocusName[my_out], P1$FST[my_out], col="magenta", pch=20)  
+```
+
+No outliers for MAN and NEW
+
+## 6. Venn diagrams
+
+
+```{r, fig.height=5, fig.width=5}
+# Read data from txt files
+MAN_AUT <-
+  read.table(
+    here("output", "outflank", "man_aut_SNPs_outFlank.txt"),
+    stringsAsFactors = FALSE
+  ) |>
+  drop_na()
+
+
+NEW_AUT <-
+  read.table(
+    here("output", "outflank", "new_aut_SNPs_outFlank.txt"),
+    stringsAsFactors = FALSE
+  )
+
+NEW_MAN_AUT <-
+  read.table(
+    here("output", "outflank", "SNPs_outFlank.txt"),
+    stringsAsFactors = FALSE
+    )
+
+
+# Create a list with all dataframes
+list_of_clusters <- list("MAN_AUT" = MAN_AUT$V1, "NEW_AUT" = NEW_AUT$V1, "NEW_MAN_AUT" = NEW_MAN_AUT$V1)
+
+
+# Create Venn diagram
+venn_diagram <- ggvenn(list_of_clusters, fill_color = c("steelblue", "darkorange", "pink"))
+print(venn_diagram)
+
+# Find common SNPs
+common_SNPs <- Reduce(intersect, list_of_clusters)
+
+# # Save the shared SNP ids into a txt file
+write.table(
+  common_SNPs,
+  file = here("output", "pcadapt", "common_SNPs_NEW_MAN_AUT.txt"),
+  row.names = FALSE,
+  col.names = FALSE,
+  quote = FALSE
+)
+
+# # # Save Venn diagram to PDF
+output_path <- here("output", "pcadapt", "figures", "significant_snps_NEW_MAN_AUT.pdf")
+ggsave(output_path, venn_diagram, height = 5, width = 5, dpi = 300)
+```
+
+
+
+

@@ -1,0 +1,2023 @@
+---
+title: "Autogenous - quality control."
+author: "Luciano V Cosme"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    highlight: breezedark
+    css:
+      - "styles.css"
+    toc: yes
+    toc_float: no
+    toc_depth: 5
+editor_options:
+  markdown:
+    wrap: 120
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  eval                        = TRUE,
+  echo                        = TRUE,
+  cache                       = TRUE, # tidy = TRUE,
+  class.output                = "bg-success"
+)
+knitr::opts_knit$set(
+  root.dir = rprojroot::find_rstudio_root_file()
+)
+```
+
+## 1. Getting started: R libraries and software for QC
+
+## 1.1 R libraries and software
+
+```{r libraries, message=FALSE, results='hide'}
+library(tidyverse)
+library(here)
+library(dplyr)
+library(ggplot2)
+library(colorout)
+library(extrafont)
+library(reticulate)
+library(scales)
+library(stringr)
+library(grid)
+library(flextable)
+library(devtools)
+library(readr)
+library(purrr)
+library(ggtext)
+library(ggvenn)
+library(data.table)
+library(RColorBrewer)
+library(ggrepel)
+library(OutFLANK)
+library(vcfR)
+library(adegenet)
+library(dartR)
+```
+
+## 1.2 Check directory structure for the project
+
+**Note:** make sure you download the raw data and place it in a new directory. You can check the directory structure
+using a tool called [Tree](https://atom.io/packages/ascii-tree "Tool for directory structure.").
+
+```{bash tree, results='hide', eval=FALSE}
+# check all the Tree options with the command in your terminal: man tree
+tree -L 2 -d --charset=ascii . # -L set the directory depth to show; the flag -d tells tree to return directories only. and the period at the end tells tree to use the current directory; --charset=ascii is to show nicely here.
+# if you want to see the files you can use the code below.
+# tree --dirsfirst .
+```
+
+```
+|-- data
+|   |-- files
+|   |-- genome
+|   |-- genotype_calls
+|   `-- raw_data
+|-- output
+`-- scripts
+    |-- functions_scripts
+    `-- markdown_files
+```
+## 1.3 Download software for quality control
+
+I used PLINK v2.00a3.3 64-bit (3 Jun 2022) for all the analysis. However, the Affymetrix software does not export the
+files directly into a format we can import into Plink2. Therefore, we need first to use Plink 1.9 to convert the `vcf` or  `.ped`
+and `.map` file format to `.bed`, `.bin`, and `.fam`. You can install it with `conda`. You can download
+[Miniconda](https://conda.io/projects/conda/en/latest/user-guide/install/download.html "To download miniconda") or
+[Anaconda](https://www.anaconda.com/ "To download Anaconda."). `conda install -c bioconda plink2`. If you have problems,
+you can also get it from [GitHub](https://github.com/chrchang/plink-ng "Download Plink2."), and compile it for your OS
+(both versions, 1.9 and 2). Please check [Marees et. al, 2018](https://doi.org/10.1002/mpr.1608 "Link to publication.")
+for more information about quality control using Plink 1.9. I used some of their code for quality control, and their
+general guidelines.
+
+Check your Plink2 version.
+```{bash plink2_version}
+plink2 --version
+```
+
+**First check if the data is in the correct location:**
+```{bash check_files, cache=TRUE}
+ls data/genotype_calls/* # we use * to truncate the name of the file showing all files
+```
+
+Note about the bash multiline comments.<br> Since we will use the Plink command with one option per
+line separated by backslash `/` , and not one single line command, we add comments using `` # ` ``
+to open and `` ` `` to close.<br> For example, we can split the `plink2 –version` into a multiline
+command with a comment.
+```{bash commenting_bash_chunks}
+plink2 `# this still works` \
+--version
+```
+
+## 2. The data
+
+I prepared the data with the families and individual ids. I also set the reference alleles to match the AlbF3 genome assembly
+
+We can check how many sample names we have in our vcf
+```{bash check_sample_names_in_vcf_file}
+# make sure you have all the .CEL samples in your family file
+bcftools query -l data/genotype_calls/autogenous.vcf | wc -l
+```
+
+## 2.1 Use Plink2 to convert to bed format
+
+```{bash plink2_convert_vcf_to_bed1}
+plink2 \
+--allow-extra-chr \
+--vcf data/genotype_calls/autogenous.vcf \
+--const-fid \
+--make-bed \
+--exclude data/files/albopictus_SNPs_fail_segregation.txt \
+--fa data/genome/albo.fasta.gz \
+--ref-from-fa 'force' `# sets REF alleles when it can be done unambiguously, we use force to change the alleles` \
+--out output/quality_control/file1 \
+--silent;
+# --keep-allele-order \ if you use Plink 1.9
+grep "variants" output/quality_control/file1.log; # to get the number of variants from the log file.
+```
+
+
+Check the fam file
+```{bash check_fam_file}
+# Check head of the data
+head output/quality_control/file1.fam
+```
+
+
+```{bash, cache=TRUE}
+head -n 5 data/files/meta_data.txt
+```
+
+
+## 2.2 Use R to update the .fam file
+
+Import the fam file we use with Axiom Suite
+
+```{r import_fam_file_Axiom, cache=TRUE}
+# the order of the rows in this file does not matter
+samples <-
+  read.delim(
+    file   = here(
+      "data",
+      "files",
+      "meta_data.txt"
+    ),
+    header = TRUE
+  )
+head(samples)
+```
+
+Import .fam file we created once we created the bed file using Plink2
+
+```{r import_fam_dp}
+# The fam file is the same for both data sets with the default or new priors
+fam1 <-
+  read.delim(
+    file   = here(
+      "output", "quality_control", "file1.fam"
+    ),
+    header = FALSE,
+    
+  )
+head(fam1)
+```
+
+We can merge the tibbles.
+
+```{r merge_objects1}
+# Extract the number part from the columns
+fam1_temp <- fam1 |>
+  mutate(num_id = as.numeric(str_extract(V2, "^\\d+")))
+
+samples_temp <- samples |>
+  mutate(num_id = as.numeric(str_extract(Sample.Filename, "^\\d+")))
+
+# Perform the left join using the num_id columns and keep the order of fam1
+df <- fam1_temp |>
+  dplyr::left_join(samples_temp, by = "num_id") |>
+  dplyr::select(-num_id) |>
+  dplyr::select(8:13)
+
+# check the data frame
+head(df)
+```
+
+We can check how many samples we have in our file
+
+```{r check_number_samples_df}
+nrow(df)
+```
+
+Before you save the new fam file, you can change the original file to a different name, to compare the order later. If
+you want to repeat the steps above after you saving the new file1.fam, you will need to import the vcf again.
+
+```{r save_new_fam_file}
+# Save and override the .fam file for dp
+write.table(
+  df,
+  file      = here(
+    "output", "quality_control", "file1.fam"
+  ),
+  sep       = "\t",
+  row.names = FALSE,
+  col.names = FALSE,
+  quote     = FALSE
+)
+```
+
+Check the new .fam file to see if has the order and the sample attributes we want.
+
+```{bash, cache=TRUE}
+# you can open the file on a text editor and double check the sample order and information.
+head -n 5 output/quality_control/file1.fam
+```
+
+
+## 2.3 Checking the number of samples and localities
+
+```{bash get_pops_n, cache=TRUE}
+awk '{print $1}' output/quality_control/file1.fam | sort | uniq -c | awk '{print $2, $1}' 
+```
+
+In Linux/Unix we have 3 `I/O streams`: Standard input (`stdin`) - this is the file handle that your process reads to get
+information from you.<br> Standard output (`stdout`) - your process writes conventional output to this file handle.<br>
+Standard error (`sterr`) - your process writes diagnostic output to this file handle.<br> Most programs need to read
+input, write output, and log errors, so `stdin`, `stdout`, and `stderr` are predefined as a programming convenience.<br>
+An easy way to access any file is by using the unique file descriptor number associated with it. In the case of these
+streams, there are unique values assigned to each one of them:<br> 0: `stdin`<br> 1: `stdout`<br> 2: `stderr`<br> 
+
+## 3. Quality control steps
+
+## 3.1 Missingness
+
+```{bash plink2_filter_SNP}
+plink2 \
+--allow-extra-chr \
+--bfile output/quality_control/file1 \
+--geno 0.2                `# we set genotype missiningness to 20% with this option` \
+--make-bed \
+--out output/quality_control/file2 \
+--silent \
+--missing;                 # --missing produces sample-based and variant-based missing data reports. If run with --within/--family, the variant-based report is stratified by cluster.
+grep "variants" output/quality_control/file2.log
+```
+
+Make plot
+```{r plot_ind_missingness, cache=TRUE}
+#   ____________________________________________________________________________
+#   import individual missingness                                           ####
+indmiss <-                                              # name of the data frame we are creating
+  read.delim(                                           # use function read table
+    file   = here(
+      "output", "quality_control", "file2.smiss"
+    ),                                                  # we use library here to import file2.imiss from data/QC
+    header = TRUE                                       # we do have headers in our file
+  )
+#   ____________________________________________________________________________
+#   import SNP missingness                                                  ####
+snpmiss <-
+  read.delim(
+    file   = here(
+      "output", "quality_control", "file2.vmiss"
+    ),
+    header = TRUE
+  )
+#
+```
+
+Plot individual missingness
+```{r plot_individual_missingness, cache=TRUE}
+
+# load plotting theme
+source(
+  here(
+    "scripts", "analysis", "my_theme2.R"
+  )
+)
+
+ggplot( # Start a ggplot object with the data and aesthetic mappings
+  indmiss,
+  aes(
+    x = F_MISS
+  )
+) +
+  geom_histogram( # Add a histogram layer
+    color            = "black",
+    fill             = "#B6FAD7",
+    bins             = 6
+  ) +
+  geom_text(
+    # Add text labels for bin counts
+    stat             = "bin",
+    aes(
+    label = after_stat(count)
+  ),
+    vjust            = -0.5,
+    color            = "purple",
+    size             = 3,
+    bins             = 6
+  ) +
+  geom_vline(
+    # Add a vertical line at the mean of F_MISS
+    aes(
+    xintercept = mean(F_MISS)),
+    color            = "orange",
+    linetype         = "dotted",
+    linewidth        = .5
+  ) +
+  geom_text(
+    # Add a text label for the mean of F_MISS
+    aes(
+      x = mean(F_MISS),
+      y = 30,
+      label = paste0(
+        "Mean \n",
+        scales::percent(mean(F_MISS),
+          accuracy = 0.01
+        )
+      )
+    ),
+    size = 3,
+    color = "orange",
+    hjust = -.1
+  ) +
+  labs( # Add axis labels
+    x                = "Individual Missingness (%)",
+    y                = "Frequency (n)"
+  ) +
+  my_theme() +
+  scale_x_continuous( # Scale the x-axis to display percentages
+    labels           = scales::percent,
+    n.breaks         = 6
+  )
+#
+# save the plot
+ggsave(
+  here(
+    "output", "quality_control", "figures" , "individual_missingness.pdf"
+  ),
+  width              = 7,
+  height             = 5,
+  units              = "in"
+)
+```
+The function my_theme() that we imported above
+```{r function_theme}
+# Define a function to customize the theme
+my_theme <- function() {
+  theme_minimal(base_size = 12, base_family = "") +
+    theme(
+      panel.grid.major = element_line(
+        linetype = "dashed",
+        linewidth = 0.2,
+        color = "pink"
+      ),
+      panel.grid.minor = element_line(
+        linetype = "dashed",
+        linewidth = 0.2,
+        color = "pink"
+      ),
+      # Customize the x-axis label
+      axis.title.x = element_text(
+        angle          = 0,
+        hjust          = 1,
+        face           = "bold"
+      ),
+      # Customize the y-axis label
+      axis.title.y = element_text(
+        angle          = 90,
+        hjust          = 1,
+        face           = "bold"
+      )
+    )
+}
+# we can save the function to source it later
+dump(                                                    # check ?dump for more information
+  "my_theme",                                            # the object we want to save
+  here(
+    "scripts", "analysis", "my_theme2.R")                # use here to save it our function as .R 
+)
+```
+
+Plot variant missingness
+```{r plot_variant_missingness, cache=TRUE}
+# This plot takes a while to compute
+# This code creates a histogram from the indmiss data set using the F_MISS column.
+# ggplot builds a histogram of individual missingness data
+ggplot(
+  snpmiss,
+  aes(
+    x = F_MISS
+  )
+) +
+  geom_histogram(
+    color = "black",
+    fill = "#B6FAD7",
+    bins = 6
+  ) +
+  stat_bin(
+    geom = "text",
+    aes(
+      label = format(
+        after_stat(count),
+        big.mark = ",",
+        scientific = FALSE
+      )
+    ),
+    vjust = -0.5,
+    color = "purple",
+    size = 2,
+    bins = 6
+  ) +
+  geom_vline(
+    aes(
+      xintercept = mean(F_MISS)
+    ),
+    color = "orange",
+    linetype = "dotted",
+    linewidth = 0.5
+  ) +
+  geom_text(
+    aes(
+      x = mean(F_MISS),
+      y = 16000,
+      label = paste0(
+        "Mean \n",
+        scales::percent(mean(F_MISS),
+          accuracy = 0.01
+        )
+      )
+    ),
+    size = 3,
+    color = "orange",
+    # hjust = 1.5,
+    vjust = -.2
+  ) +
+  labs(
+    x = "Variant Missingness (%)",
+    y = "Frequency (n)"
+  ) +
+  # theme_minimal(
+  #   base_size = 12,
+  #   base_family = "Roboto Condensed"
+  # ) +
+  scale_x_continuous(
+    labels = scales::percent,
+    n.breaks = 6
+  ) +
+  scale_y_continuous(
+    labels = scales::label_comma(),
+    n.breaks = 5
+  ) +
+  my_theme()
+
+# save the plot
+ggsave(
+  here(
+    "output", "quality_control", "figures", "SNPs_missingness.pdf"
+  ),
+  width  = 7,
+  height = 5,
+  units  = "in"
+)
+```
+
+Remove individuals missing more than 20% of SNPs. You can use the threshold you want, change the flag --mind
+
+```{bash plink2_filter_ind}
+plink2 \
+--allow-extra-chr \
+--bfile output/quality_control/file2 \
+--mind 0.2               `# here we set the individual missingness threshold of 20%`\
+--make-bed \
+--out output/quality_control/file3 \
+--silent;
+grep "samples\|variants" output/quality_control/file3.log
+```
+We did not remove any SNP due to individual missingness
+
+## 3.2 Minor allele frequency
+
+First lets make a plot of the MAF. First, we estimate the allele frequency with Plink.
+```{bash plink2_MAF_check, eval=FALSE}
+plink2 \
+--allow-extra-chr \
+--bfile output/quality_control/file3 \
+--freq \
+--out output/quality_control/MAF_check \
+--silent
+```
+
+Then we plot it with ggplot.
+
+```{r import_MAF}
+#   ____________________________________________________________________________
+#   Import MAF data                                                         ####
+maf_freq <-
+  read.delim(
+    here(
+      "output", "quality_control", "MAF_check.afreq"
+    ),
+    header = TRUE
+  )
+```
+
+Make MAF plot
+```{r plot_MAF}
+#   ____________________________________________________________________________
+#   make the plot                                                           ####
+ggplot(
+  maf_freq,
+  aes(ALT_FREQS)
+) +
+  geom_histogram(
+    colour = "black",
+    fill = "#C4F3F5",
+    bins = 40
+  ) +
+  labs(
+    x = "Minor Allele Frequency (MAF)",
+    y = "Frequency (n)",
+    caption = "<span style='color:red;'><i>Red</i></span> <span style='color:black;'><i>line at</i></span><span style='color:red;'><i> MAF 10%</i></span><span style='color:black;'><i> threshold</i></span>."
+  ) +
+  geom_text(
+    aes(
+      x = .1,
+      y = 8000,
+      label = paste0("15,890 SNPs")
+    ),
+    size = 3,
+    color = "blue",
+    vjust = -.2
+  ) +
+  geom_vline(xintercept = 0.1, color = "red") +
+  my_theme() +
+  theme(plot.caption = element_markdown()) +
+  scale_y_continuous(label = scales::number_format(big.mark = ",")) +
+  scale_x_continuous(breaks = c(0, 0.1, 0.2, 0.4, 0.6, 0.8, 1))
+#   ____________________________________________________________________________
+#   save the plot                                                           ####
+ggsave(
+  here(
+    "output", "quality_control", "figures", "MAF.pdf"
+  ),
+  width  = 5,
+  height = 4,
+  units  = "in"
+)
+```
+
+Now we apply the MAF filter.
+```{bash filter_MAF, cache=TRUE, eval=FALSE}
+# We will use MAF of 1%
+plink2 \
+--allow-extra-chr \
+--bfile output/quality_control/file3 \
+--maf 0.01 \
+--make-bed \
+--out output/quality_control/file4 \
+--silent;
+grep "variants" output/quality_control/file4.log
+```
+
+We removed 11,314 variants due to the MAF filter. Next we will excludes markers which deviate from
+Hardy--Weinberg equilibrium (HWE). It is a common indicator of genotyping error, but may also
+indicate evolutionary selection. We have to do it for each population individually. We cannot do it
+for all populations at once. Therefore, the first step is to create a new bed file with Plink keeping
+only one population. I like to create a new directory and name it "hardy", and copy the "file4"
+there.
+
+```{bash mkdirs_4_HWE, eval=FALSE}
+mkdir -p output/quality_control/hardy;
+cp output/quality_control/file4.* output/quality_control/hardy/
+```
+
+## 3.3 HWE test
+
+Now we can run the HWE test. However, we will need to apply the SNP missingness again for each
+population. If we do not, the HWE will vary widely. With the bash script below, we will create a new
+file for each population, run the HWE test with HWE p value \<1e‐6 (HWE p value \<1e‐6). Then, we
+ask Plink to generate a list of SNPs that passed the test for each population.
+
+```{bash loop_filter_HWE, eval=FALSE}
+for fam in $(awk '{print $1}' output/quality_control/hardy/file4.fam | sort | uniq); 
+do 
+echo $fam | \
+plink2 \
+--allow-extra-chr \
+--silent \
+--keep-allele-order \
+--bfile output/quality_control/hardy/file4 \
+--keep-fam /dev/stdin \
+--make-bed \
+--out output/quality_control/hardy/$fam \
+--hwe 0.000001 \
+--geno 0.1 \
+--write-snplist; \
+done
+```
+
+Next, we use "cat" and "`awk`" to concatenate the SNP list from all populations, and remove
+duplicates. Once we have a list of SNPs that passed the test for each population, we can use Plink
+to create a new bed file keeping only the SNPs that passed the test in each population.
+First, lets get the list of SNPs, and count how many passed:
+
+```{bash get_SNP_list_after_HWE, eval=FALSE}
+cat output/quality_control/hardy/*.snplist | awk '!a[$0]++' > output/quality_control/passed_hwe.txt;
+wc -l output/quality_control/passed_hwe.txt
+```
+
+How many variants we had before
+
+```{bash check_n_variants_before_HWE}
+cat output/quality_control/file4.bim | awk '{print $2}'| awk '!a[$0]++' | wc -l
+```
+
+Variants not passing HWE test
+```{r}
+111220 - 110353
+```
+
+Remove the SNPs that failed
+```{bash, cache=TRUE, eval=FALSE}
+plink2 \
+--allow-extra-chr \
+--bfile output/quality_control/file4 \
+--extract output/quality_control/passed_hwe.txt \
+--make-bed \
+--out output/quality_control/file4a \
+--silent;
+grep "variants" output/quality_control/file4a.log
+```
+
+## 3.4 LD pruning
+
+```{bash linkage_prunning, cache=TRUE, eval=FALSE}
+plink2 \
+--allow-extra-chr \
+--bfile output/quality_control/file4a \
+--indep-pairwise 5 1 0.1 \
+--out output/quality_control/indepSNP \
+--silent;
+grep 'pairwise\|variants\|samples' output/quality_control/indepSNP.log
+```
+
+
+## 3.6 Heterozygosity
+```{bash plink1.9_estimate_heterozygosity, cache=TRUE}
+plink2 \
+--allow-extra-chr \
+--bfile output/quality_control/file4a \
+--extract output/quality_control/indepSNP.prune.in \
+--het \
+--out output/quality_control/R_check \
+--silent;
+grep 'variants' output/quality_control/R_check.log
+```
+
+Plot it
+```{r plot_heterozygosity, cache=TRUE}
+#   ____________________________________________________________________________
+#   find individuals with high heterozygosity                              ####
+# import the data from Plink
+het <- read.delim(
+  here(
+    "output", "quality_control", "R_check.het"
+  ),
+  head = TRUE
+)
+#
+# check head of the file
+colnames(het)
+```
+
+Estimate het
+```{r calculate_het, cache=TRUE}
+# create a column named HET_RATE and calculate the heterozygosity rate
+het$HET_RATE <- (het$"OBS_CT" - het$"O.HOM") / het$"OBS_CT"
+#
+# use subset function to get values deviating from 4sd of the mean heterozygosity rate.
+het_fail <-
+  subset(
+    het, (het$HET_RATE < mean(
+      het$HET_RATE
+    ) - 4 * sd(
+      het$HET_RATE
+    )) |
+      (het$HET_RATE > mean(
+        het$HET_RATE
+      ) + 4 * sd(
+        het$HET_RATE
+      ))
+  )
+#
+# get the list of individuals that failed our threshold of 4sd from the mean.
+het_fail$HET_DST <-
+  (het_fail$HET_RATE - mean(
+    het$HET_RATE
+  )) / sd(
+    het$HET_RATE
+  )
+```
+
+Save the files to use with Plink
+
+```{r save_list_fail_het, cache=TRUE}
+#   ____________________________________________________________________________
+#   save the data to use with Plink2                                        ####
+#
+write.table(
+  het_fail,
+  here(
+    "output", "quality_control", "fail-het-qc.txt"
+  ),
+  row.names = FALSE
+)
+```
+
+Make plot
+```{r plot_het, cache=TRUE}
+#   ____________________________________________________________________________
+#   make a heterozygosity plot                                              ####
+#
+ggplot(
+  het,
+  aes(
+    HET_RATE
+  )
+) +
+  geom_histogram(
+    colour           = "black",
+    fill             = "#CDFAF8",
+    bins             = 40
+  ) +
+  labs(
+    x                = "Heterozygosity Rate",
+    y                = "Number of Individuals"
+  ) +
+  geom_vline(
+    aes(
+      xintercept     = mean(
+        HET_RATE
+      )
+    ),
+    col              = "#F2C46F",
+    linewidth        = 1.5
+  ) +
+  geom_vline(
+    aes(
+      xintercept     = mean(
+        HET_RATE
+      ) + 4 * sd(
+        HET_RATE
+      )
+    ),
+    col              = "#BFB9B9",
+    linewidth        = 1
+  ) +
+  geom_vline(
+    aes(
+      xintercept     = mean(
+        HET_RATE
+      ) - 4 * sd(
+        HET_RATE
+      )
+    ),
+    col              = "#BFB9B9",
+    linewidth        = 1
+  ) + 
+  my_theme() +
+  scale_y_continuous(
+    labels           = comma
+  )
+#   ____________________________________________________________________________
+#   save the heterozygosity plot                                            ####
+ggsave(
+  here(
+    "output", "quality_control", "figures", "Heterozygosity.pdf"
+  ),
+  width  = 5,
+  height = 4,
+  units  = "in"
+)
+```
+
+The orange line in the plot above indicates the mean, and the gray lines indicate 4 standard deviation
+from the mean. We can see that some mosquitoes do have excess heterozygous sites. We will remove
+them. We can get their ID from the file "`fail-het-qc.txt`". We can use the bash script below to
+parse the file to use with Plink
+
+```{bash parse_R_het_output, cache=TRUE}
+sed 's/"// g' output/quality_control/fail-het-qc.txt | awk '{print$1, $2}'> output/quality_control/het_fail_ind.txt;
+echo 'How many mosquitoes we need to remove from our data set:';
+cat output/quality_control/het_fail_ind.txt | tail -n +2 | wc -l;
+echo 'Which mosquitoes we have to remove:';
+tail -n +2 output/quality_control/het_fail_ind.txt
+```
+The population from Nepal has high heterozygosity rate. We will remove 2 individuals.
+
+Next, we will remove these mosquitoes from our data set using Plink:
+```{bash plink2_remove_fail_het, cache=TRUE, eval=FALSE}
+plink2 \
+--allow-extra-chr \
+--bfile output/quality_control/file4a \
+--remove output/quality_control/het_fail_ind.txt \
+--make-bed \
+--out output/quality_control/file5 \
+--silent;
+grep 'variants\|samples' output/quality_control/file5.log
+```
+
+## 3.7 Relatedness
+
+Check for cryptic relatedness. Check Plink2 documentation
+<https://www.cog-genomics.org/plink/2.0/distance> You can download King directly
+<https://www.kingrelatedness.com/manual.shtml> or check their manuscript
+<https://www.ncbi.nlm.populations.gov/pmc/articles/PMC3025716/pdf/btq559.pdf>
+From Plink2 documentation: "Note that KING kinship coefficients are scaled such that duplicate
+samples have kinship 0.5, not 1. First-degree relations (parent-child, full siblings) correspond to
+\~0.25, second-degree relations correspond to \~0.125, etc. It is conventional to use a cutoff of
+\~0.354 (the geometric mean of 0.5 and 0.25) to screen for monozygotic twins and duplicate samples,
+\~0.177 to add first-degree relations, etc." There two options. One is to run only --make-king and
+another one is to use --make-king-table We will use the threshold of 0.354 and create a table.
+
+
+```{bash plink2_make_king, cache=TRUE}
+# Plink2 will create a file with extension .king
+plink2 \
+--allow-extra-chr \
+--bfile output/quality_control/file5 \
+--extract output/quality_control/indepSNP.prune.in \
+--make-king-table rel-check \
+--king-table-filter 0.354 \
+--out output/quality_control/file5a \
+--silent;
+grep 'variants\|samples' output/quality_control/file5a.log
+```
+
+Check the individuals that did not pass our filtering.
+
+```{bash check_kin0, cache=TRUE}
+head output/quality_control/file5a.kin0
+```
+No related individulas
+
+We want to remove one of the individuals of the pairs.
+```{bash remove_related1}
+plink2 \
+--allow-extra-chr \
+--bfile output/quality_control/file5 \
+--extract output/quality_control/indepSNP.prune.in \
+--make-king triangle bin \
+--out output/quality_control/file6 \
+--silent;
+grep 'variants\|samples' output/quality_control/file6.log
+```
+
+Now we can use Plink2 to remove one of the mosquitoes from the pair with high kinship. It will
+remove 2 samples since we had 2 samples in some populations with high relatedness, and we could
+remove 1 and keep the other two. Plink2 always tries to maximize the number of samples passing the
+filters.
+```{bash remove_related2}
+plink2 \
+--allow-extra-chr \
+--bfile output/quality_control/file5 \
+--king-cutoff output/quality_control/file6 0.354 \
+--make-bed \
+--out output/quality_control/file7 \
+--silent;
+grep 'samples\|variants\|remaining' output/quality_control/file7.log
+```
+
+Now we can check the individuals that were removed.
+```{bash check_id_removed_individuals}
+head -n 10 output/quality_control/file7.king.cutoff.out.id
+```
+
+None removed duo to relatedness
+
+## 3.8 Quick PCA with Plink using the LD pruned data
+
+```{bash plink_pca}
+plink2 \
+--allow-extra-chr \
+--bfile output/quality_control/file7 \
+--pca allele-wts \
+--freq \
+--out output/quality_control/pca_pops \
+--silent;
+grep 'samples\|variants' output/quality_control/pca_pops.log
+```
+
+Check the files
+```{bash check_eigenvec}
+head -n 2 output/quality_control/pca_pops.eigenvec
+```
+
+```{bash check_eigenval}
+head -n 2 output/quality_control/pca_pops.eigenval
+```
+
+Import PCA data
+```{r import_pca}
+# import the data from Plink
+pca <- read.delim(
+  here(
+    "output", "quality_control", "pca_pops.eigenvec"
+  ),
+  head = TRUE
+)
+ 
+# check head of the file
+head(pca)
+```
+
+Load the data
+```{r}
+load(here(
+    "output", "quality_control", "figures", "pca.RData"
+  ))
+```
+
+Make plot1
+```{r simple_pca_plot1, fig.height=5, fig.width=7}
+# source the plotting function
+source(here("scripts", "analysis", "my_theme2.R"))
+
+# Shapes
+N = 100
+M = 1000
+good.shapes = c(1:25, 33:127)
+
+# Colors
+palette1 <- brewer.pal(12, "Paired")
+palette2 <- brewer.pal(11, "Set3")
+palette23 <- c(palette1, palette2)
+
+# Compute the count
+family_count <- pca |>
+  group_by(X.FID) |>
+  summarize(count = n())
+
+# Merge the count back to the main data
+df4 <- pca |>
+  left_join(family_count, by = "X.FID")
+
+# Create a custom label for the legend
+df4$family_label <-
+  paste(df4$X.FID, " (", df4$count, ")", sep = "")
+
+# Define the color and shape manually
+palette23 <- c(palette1, palette2)
+colors <- setNames(palette23, unique(df4$family_label))
+shapes <-
+  setNames(good.shapes[c(1:25, 58:67)], unique(df4$family_label))
+
+
+# Compute the center of ellipses for each continent
+ellipse_centers <- df4 |>
+  group_by(X.FID) |>
+  summarise(PC1_center = mean(PC1), PC2_center = mean(PC2))
+
+# Create the plot
+ggplot(df4, aes(PC1, PC2)) +
+  geom_point(aes(shape = family_label, color = family_label)) +
+  stat_ellipse(
+    aes(fill = X.FID, group = X.FID),
+    geom = "polygon",
+    alpha = 0.2,
+    level = 0.8,
+    segments = 40,
+    color = "transparent",
+    show.legend = FALSE
+  ) +
+  geom_text_repel(
+    data = ellipse_centers,
+    aes(x = PC1_center, y = PC2_center, label = X.FID),
+    color = c("black", "red", "blue")
+  ) +
+  xlab("PC1 (7.94% Variance)") +
+  ylab("PC2 (4.09% Variance)") +
+  # labs(caption = "Principal Component Analysis with 110,353 SNPs.") +
+   guides(
+  color = guide_legend(title = "Family", order = 1, ncol = 3),
+  shape = guide_legend(title = "Family", order = 1, ncol = 3),
+  fill = guide_legend(title = "Family", order = 1, ncol = 3)
+  ) +
+  scale_fill_manual(values = c("gray", "red", "lightblue"), labels = df4$family_label) +
+  scale_color_manual(values = c("black", "red", "blue")) +
+  scale_shape_manual(values = shapes) +
+  # my_theme() +
+  theme_classic() +
+  theme(
+    plot.caption = element_text(face = "italic"),
+    legend.position = "top",
+    legend.direction = "horizontal",
+    legend.justification = "center",
+    legend.box.just = "center",
+    legend.box.background = element_blank(),
+    plot.margin = margin(5.5, 30, 5.5, 5.5, "points"),
+    legend.margin = margin(10, 10, 10, 10)
+)
+
+
+#   ____________________________________________________________________________
+#   save the pca plot                                                       ####
+ggsave(
+  here(
+    "output", "quality_control", "figures", "PCA_plink.pdf"
+  ),
+  width  = 7,
+  height = 5,
+  units  = "in"
+)
+```
+
+Save all the data
+```{r}
+# List all objects in the environment
+objects <- ls()
+
+# Save all objects into a single .RData file
+save(list = objects, file = here(
+    "output", "quality_control", "figures", "pca.RData"
+  ))
+```
+
+
+
+
+## 4. Create chromosomal scale
+
+Import the .bim file with the SNPs to create a new chromosomal scale.
+
+```{r}
+#   ____________________________________________________________________________
+#   import the bim file with the SNP data                                   ####
+snps <-
+  read_delim(                    # to learn about the options use here, run ?read_delim on the console.
+    here(
+      "output", "quality_control", "file7.bim"
+    ),                           # use library here to load it
+    col_names      = FALSE,      # we don't have header in the input file
+    show_col_types = FALSE,      # suppress message from read_delim
+    col_types      = "ccidcc"    # set the class of each column
+  )
+#
+# set column names
+colnames(
+  snps
+) <-                             # to add a header in our tibble
+  c(
+    "Scaffold", "SNP", "Cm", "Position", "Allele1", "Allele2"
+  )
+#
+# check the tibble
+head(snps)
+```
+
+We can write a function to import the bim files.
+
+```{r, eval=FALSE}
+#   ____________________________________________________________________________
+#   function to import bim files                                            ####
+#
+import_bim <- function(file) {
+  # import as a tibble and set columns as integers
+  bim <-
+    read_delim(
+      file,
+      col_names      = FALSE,
+      show_col_types = FALSE,
+      col_types      = "ccidcc"
+    )
+  # rename the columns by index
+  bim <- bim |>
+    rename(
+      Scaffold = 1,
+      SNP      = 2,
+      Cm       = 3,
+      Position = 4,
+      Allele1  = 5,
+      Allele2  = 6
+    )
+  return(bim)
+}
+# we can save the function to source it later
+dump(                                                     # check ?dump for more information
+  "import_bim",                                           # the object we want to save
+  here(
+    "scripts", "analysis", "import_bim.R")       # use here to save it our function as .R 
+)
+```
+
+Separate the tibbles into each chromosome.
+
+```{r separate_data_into_chroms}
+#   ____________________________________________________________________________
+#   separate the SNP data per chromosome                                    ####
+# chr1
+chr1_snps <-
+  snps |>
+  filter(
+    str_detect(
+      Scaffold, "^1."
+    )
+  ) |> # here we get only Scaffold rows starting with 1
+  as_tibble() # save as tibble
+#
+# chr2
+chr2_snps <-
+  snps |>
+  filter(
+    str_detect(
+      Scaffold, "^2."
+    )
+  ) |>
+  as_tibble()
+#
+# chr3
+chr3_snps <-
+  snps |>
+  filter(
+    str_detect(
+      Scaffold, "^3."
+    )
+  ) |>
+  as_tibble()
+```
+
+Now we can index the reference genome with the new scaffold names that match our .bim file
+
+```{bash index_genome_updated_scaffold_names, eval=FALSE}
+# index the genome
+samtools faidx data/genome/albo.fasta.gz 
+```
+
+Transfer genome to the cluster.
+
+```{bash transfer_data_from_computer_to_cluster, eval=FALSE, message=FALSE, results='hide'}
+# change the paths to match your directories
+rsync -chavzP --stats /Users/lucianocosme/Dropbox/Albopictus/manuscript_chip/data/no_autogenous/albo_chip/data/genome/* lvc26@ruddle.hpc.yale.edu:/ycga-gpfs/project/caccone/lvc26/albo_manuscript/updated_genome
+```
+
+Now we can get the scaffold order and their size from the `.fai` file. Check the about it at `Samtools` documentation
+[HERE](http://www.htslib.org/doc/faidx.html).
+
+```{bash scaffold_order_by_chr, eval=FALSE}
+# check the head of the .fai file
+head data/genome/albo.fasta.gz.fai
+# For each row:
+# Column 1: The scaffold name. In your FASTA file, this is preceded by '>'
+# Column 2: The number of bases in the scaffol
+# Column 3: The byte index of the file where the scaffold sequence begins.
+# Column 4: bases per line in the FASTA file
+# Column 5: bytes per line in the FASTA file
+# 
+# we can use awk to get the first two columns, I also change the field separator.
+cat data/genome/albo.fasta.gz.fai | awk 'BEGIN{FS=" "; OFS="\t"} {print $1, $2}' > data/genome/scaffold_sizes.txt;
+echo "scaffold sizes";
+# check the output
+head data/genome/scaffold_sizes.txt
+# since we fixed the scaffold order previous, and also moved the scaffold 1.86 to its correct position, we can move ahead and calculate the new scale for our SNPs.
+```
+
+Import the file with sizes of each scaffold.
+
+```{r}
+#   ____________________________________________________________________________
+#   import the file with the scaffold sizes                                 ####
+sizes <-
+  read_delim(
+    here(
+      "data", "genome", "scaffold_sizes.txt"
+    ),
+    col_names      = FALSE,
+    show_col_types = FALSE,
+    col_types      = "cd"
+  )
+#
+# set column names
+colnames(
+  sizes
+) <- c(
+  "Scaffold", "Size"
+)
+#   ____________________________________________________________________________
+#   create new column with the chromosome number                            ####
+sizes <- 
+  sizes |>
+  mutate(
+    Chromosome = case_when( # we use mutate to create a new column called Chromosome
+      startsWith(
+        Scaffold, "1"
+      ) ~ "1", # use startsWith to get Scaffold rows starting with 1 and output 1 on Chromosome column
+      startsWith(
+        Scaffold, "2"
+      ) ~ "2",
+      startsWith(
+        Scaffold, "3"
+      ) ~ "3"
+    )
+  ) |>
+  arrange(
+    Scaffold
+  )                   # to sort the order of the scaffolds, fixing the problem we have with scaffold 1.86
+# check it
+head(sizes)
+```
+
+Create new scale. Get the scaffolds for each chromosome.
+
+```{r get_list_scaffolds_per-chr}
+#   ____________________________________________________________________________
+#   separate the scaffold sizes tibble per chromosome                       ####
+# chr1
+chr1_scaffolds <- 
+  sizes |>
+  filter(
+    str_detect(
+      Scaffold, "^1" # we use library stringr to get scaffolds starting with 1 (chromosome 1)
+    )
+  ) |> 
+  as_tibble()
+#
+# chr2
+chr2_scaffolds <-
+  sizes |>
+  filter(
+    str_detect(
+      Scaffold, "^2" # we use library stringr to get scaffolds starting with 2 (chromosome 2)
+    )
+  ) |> 
+  as_tibble()
+#
+# # chr3
+chr3_scaffolds <-
+  sizes |>
+  filter(
+    str_detect(
+      Scaffold, "^3" # we use library stringr to get scaffolds starting with 3 (chromosome 3)
+    )
+  ) |>
+  as_tibble()
+```
+
+Create a scale for each chromosome.
+
+```{r create_chr_scale}
+#   ____________________________________________________________________________
+#   create a new scale for each chromosome                                  ####
+# chr1
+chr1_scaffolds$overall_size_before_bp <-
+  0                                                                        # we create a new column with zeros
+for (i in 2:nrow(
+  chr1_scaffolds
+)
+) {                                                                        # loop to start on second line
+  chr1_scaffolds$overall_size_before_bp[i] <-                              # set position on the scale
+    chr1_scaffolds$overall_size_before_bp[i - 1] + chr1_scaffolds$Size[i - # add the scaffold size and the location to get position on new scale
+      1]
+}
+#
+# chr2
+chr2_scaffolds$overall_size_before_bp <- 0
+for (i in 2:nrow(
+  chr2_scaffolds
+)
+) {
+  chr2_scaffolds$overall_size_before_bp[i] <-
+    chr2_scaffolds$overall_size_before_bp[i - 1] + chr2_scaffolds$Size[i -
+      1]
+}
+#
+# chr3
+chr3_scaffolds$overall_size_before_bp <- 0
+for (i in 2:nrow(
+  chr3_scaffolds
+)
+) {
+  chr3_scaffolds$overall_size_before_bp[i] <-
+    chr3_scaffolds$overall_size_before_bp[i - 1] + chr3_scaffolds$Size[i -
+      1]
+}
+```
+
+Merge the data frames scaffolds and SNPs.
+
+```{r merge_snps_scales}
+#   ____________________________________________________________________________
+#   merge the data sets using the tidyverse function left_join              ####
+# chr1
+chr1_scale <-
+  chr1_snps |>          # create data frame for each chromosome, get chr1_snps
+  left_join(            # use lef_join function to merge it with chr1_scaffolds
+    chr1_scaffolds,
+    by = "Scaffold"
+  ) |>                  # set column to use for merging (Scaffold in this case)
+  na.omit() |>          # remove NAs, we don't have SNPs in every scaffold
+  mutate(
+    midPos_fullseq = as.numeric(
+      Position
+    ) +                 # make new columns numeric
+      as.numeric(
+        overall_size_before_bp
+      )
+  )
+#
+# chr2
+chr2_scale <-
+  chr2_snps |>
+  left_join(
+    chr2_scaffolds,
+    by = "Scaffold"
+  ) |>
+  na.omit() |>
+  mutate(
+    midPos_fullseq = as.numeric(
+      Position
+    ) +
+      as.numeric(
+        overall_size_before_bp
+      )
+  )
+#
+# chr3
+chr3_scale <-
+  chr3_snps |>
+  left_join(
+    chr3_scaffolds,
+    by = "Scaffold"
+  ) |>
+  na.omit() |>
+  mutate(
+    midPos_fullseq = as.numeric(
+      Position
+    ) +
+      as.numeric(
+        overall_size_before_bp
+      )
+  )
+```
+
+Merge all chromosome scales.
+
+```{r bind_chr_scales}
+#   ____________________________________________________________________________
+#   merge the data sets, and select only the columns we need                ####
+chroms <- rbind(
+  chr1_scale, chr2_scale, chr3_scale
+) |>
+  dplyr::select(
+    Chromosome, SNP, Cm, midPos_fullseq, Allele1, Allele2
+  )
+# check it
+head(chroms)
+```
+
+Save the new .bim file
+
+```{r}
+#   ____________________________________________________________________________
+#   save the new bim file with a new name, I added "B"                      ####
+write.table(
+  chroms,
+  file      = here(
+    "output", "quality_control", "file7B.bim"
+  ),
+  sep       = "\t",
+  row.names = FALSE,
+  col.names = FALSE,
+  quote     = FALSE
+)
+```
+
+Rename the .bim files
+
+```{bash}
+# change the name of the first .bim file, for example, append _backup.bim, and then replace the original file
+mv output/quality_control/file7.bim output/quality_control/file7_backup.bim;
+# than change the new bim we create to the original name (do it only once, otherwise it will mess up)
+mv output/quality_control/file7B.bim output/quality_control/file7.bim
+```
+
+Create a new bed file with Plink2 to see if it works. For example, to see if the variants are in the
+right order. Plink2 will give us a warning.
+
+```{bash}
+plink2 \
+--bfile output/quality_control/file7 \
+--make-bed \
+--out output/quality_control/test01;
+# then we remove the files 
+rm output/quality_control/test01.*
+```
+
+No warnings from Plink2. Now, we can go ahead with our analysis.
+
+## 5. Plot SNP density
+
+After quality control with approximately 60k SNPs
+
+```{r import_qc_data_for_density_plot, warning=FALSE}
+# load the function that we saved earlier
+source(
+  here(
+    "scripts", "analysis", "import_bim.R"
+  ),
+  local = knitr::knit_global()
+)
+# import the file
+snp_den_qc <- import_bim(
+  here(
+    "output", "quality_control", "file7.bim"
+  )
+)
+```
+
+Make plot of the SNP density
+
+```{r make_density_plot_qc_data, cache=TRUE}
+#   ____________________________________________________________________________
+#   plot SNP density after QC                                               ####
+snp_den_qc |>
+  rename(
+    Chromosome = 1
+  ) |>
+  mutate(
+    Position           = as.numeric(
+      Position
+    )
+  ) |>
+  ggplot(
+    aes(
+      x                = Position
+    ),
+    label              = sprintf(
+      "%0.2f",
+      round(
+        a,
+        digits         = 0
+      )
+    )
+  ) +
+  geom_histogram(
+    aes(
+      y                = after_stat(
+        count
+      )
+    ),
+    binwidth           = 1e6
+  ) +
+  facet_wrap(
+    vars(
+      Chromosome
+    ),
+    scales             = "free_x"
+  ) +
+  labs(
+    title              = "SNP Density after QC",
+    x                  = expression(
+      "Position in the genome (Mb)"
+    ),
+    y                  = expression(
+      "Number of SNPs"
+    )
+  ) +
+  scale_x_continuous(
+    labels             = function(x) {
+      format(
+        x / 1e6,
+        big.mark       = ",", 
+        scientific     = FALSE
+      )
+    }
+  ) +
+  geom_density(
+  aes(
+    y = 1e6 * after_stat(count)
+  ),
+  color = "red",
+  linewidth = .75,
+  alpha = .4,
+  fill = "pink"
+  ) +
+  hrbrthemes::theme_ipsum(
+    base_family        = "Roboto Condensed",
+    axis_text_size     = 12,
+    axis_title_size    = 14,
+    plot_margin        = margin(
+      10, 10, 10, 10
+    ),
+    grid               = TRUE,
+    grid_col           = "#fabbe2"
+  ) +
+  theme(
+    panel.grid.major   = element_line(
+      linetype         = "dashed",
+      linewidth        = 0.2
+    ),
+    panel.grid.minor   = element_line(
+      linetype         = "dashed",
+      linewidth        = 0.2
+    ),
+    panel.spacing      = unit(0.5, "lines"),
+    strip.text         = element_text(
+      face             = "bold", hjust = .5
+    ),
+    strip.background.x = element_rect(
+      color            = "gray"
+    )
+  )
+#   ____________________________________________________________________________
+#   save the density plot                                            ####
+ggsave(
+  here(
+    "output", "quality_control","figures", "snp_density_after_qc.pdf"
+  ),
+  width  = 10,
+  height = 6,
+  units  = "in"
+)
+```
+
+SNPs per chromosome
+
+```{r SNPs_per_chromsomosome_after_QC}
+# we can use dplyr "count" to get the number of SNPs for each chromosome
+# lets get the data we need
+snps_per_chrm <- 
+  snp_den_qc |>
+  count(
+    Scaffold) |>
+  rename(
+    Chromosome = 1,
+    "SNPs (N) " = 2
+  )
+
+# Create the flextable
+ft <- flextable::flextable(snps_per_chrm)
+
+# Apply zebra theme
+ft <- flextable::theme_zebra(ft)
+
+# Add a caption to the table
+ft <- flextable::add_header_lines(ft, "SNPs per chromosome after quality control")
+ft
+```
+
+We can get the mean number of SNPs per chromosome or the entire genome
+
+```{r SNPs_per_1Mb_window}
+# we first use dplyr cut_width to get the number of SNPs per 1Mb window
+albo_den <- 
+  snp_den_qc |>
+  dplyr::select(
+    Scaffold, Position
+  ) |>
+  group_by(
+    Scaffold,
+    windows               = cut_width(
+      Position,
+      width               = 1e6,
+      boundary            = 0
+    )
+  ) |>
+  summarise(
+    n                     = n(),
+    .groups               = "keep"
+  ) |>
+  group_by(
+    Scaffold
+  ) |>
+  summarise(
+    mean                  = mean(n),
+    n                     = n(),
+    .groups               = "keep"
+  ) |>
+  rename(
+    Chromosome            = 1,
+    "SNPs per 1Mb window" = 2,
+    "Number of windows"   = 3
+  )
+#
+# check the results
+snp_table <-
+  flextable(
+    albo_den
+  )
+snp_table <- colformat_double(
+  x        = snp_table,
+  big.mark = ",",
+  digits   = 2,
+  na_str   = "N/A"
+)
+snp_table
+```
+
+Merge objects
+
+```{r merge_obj}
+# we can merge the two data sets we created above into one table
+after_qc <-
+  snps_per_chrm |>
+  left_join(
+    albo_den,
+    by = "Chromosome"
+  )
+snp_table2 <- flextable(
+  after_qc)
+snp_table2 <- colformat_double(
+  x        = snp_table2,
+  big.mark = ",",
+  digits   = 2, 
+  na_str   = "N/A"
+  )
+snp_table2
+```
+
+
+
+## 6. Create data sets for downstream analysis
+
+We can perform the following comparisons
+MAN vs AUT
+NEW vs AUT
+MAN vs NEW
+and only AUT
+```{bash}
+echo "MAN
+AUT" > output/quality_control/man_aut.txt;
+echo "NEW
+AUT" > output/quality_control/new_aut.txt;
+echo "MAN
+NEW" > output/quality_control/man_new.txt
+echo "AUT" > output/quality_control/aut.txt
+```
+
+
+Create a vcf and bed file for each combination using the LD pruned data
+
+MAN vs AUT
+```{bash}
+plink2 \
+--bfile output/quality_control/file7 \
+--keep-fam output/quality_control/man_aut.txt \
+--export vcf \
+--extract output/quality_control/indepSNP.prune.in \
+--make-bed \
+--geno 0.2 \
+--out output/outflank/man_aut \
+--silent;
+grep "samples\|variants" output/outflank/man_aut.log 
+```
+
+NEW vs AUT
+```{bash}
+plink2 \
+--bfile output/quality_control/file7 \
+--keep-fam output/quality_control/new_aut.txt \
+--export vcf \
+--extract output/quality_control/indepSNP.prune.in \
+--make-bed \
+--geno 0.2 \
+--out output/outflank/new_aut \
+--silent;
+grep "samples\|variants" output/outflank/new_aut.log 
+```
+
+MAN vs NEW
+```{bash}
+plink2 \
+--bfile output/quality_control/file7 \
+--keep-fam output/quality_control/man_new.txt \
+--export vcf \
+--extract output/quality_control/indepSNP.prune.in \
+--make-bed \
+--geno 0.2 \
+--out output/outflank/man_new \
+--silent;
+grep "samples\|variants" output/outflank/man_new.log 
+```
+
+AUT
+```{bash}
+plink2 \
+--bfile output/quality_control/file7 \
+--keep-fam output/quality_control/aut.txt \
+--export vcf \
+--extract output/quality_control/indepSNP.prune.in \
+--make-bed \
+--geno 0.2 \
+--out output/outflank/aut \
+--silent;
+grep "samples\|variants" output/outflank/aut.log 
+```
+
+## 7. PCA dapc
+Create files
+```{bash}
+plink \
+--keep-allele-order \
+--bfile output/quality_control/file7 \
+--make-bed \
+--out output/quality_control/dapc1 \
+--silent;
+grep 'samples\|variants\|remaining' output/quality_control/dapc1.log
+```
+
+
+Import .fam file we created once we created the bed file using Plink2
+
+```{r}
+fam_file_path <- here("output", "quality_control", "dapc1.fam")
+fam1 <- read.table(fam_file_path, header = FALSE)
+
+head(fam1)
+```
+
+We can merge the tibbles.
+
+```{r}
+# Extract the number part from the columns
+fam1_temp <- fam1 |>
+  mutate(num_id = as.numeric(str_extract(V2, "^\\d+")))
+
+# Assuming your data frame is named fam1
+fam1$V2 <- paste(fam1$V1, fam1$V2, sep = "_")
+
+# To check the first few rows of the modified data frame
+head(fam1)
+```
+Save it
+```{r}
+# Save and override the .fam file for dp
+write.table(
+  fam1,
+  file      = here(
+    "output", "quality_control", "dapc1.fam"
+  ),
+  sep       = "\t",
+  row.names = FALSE,
+  col.names = FALSE,
+  quote     = FALSE
+)
+```
+
+Check the new .fam file to see if has the order and the sample attributes we want.
+
+```{bash, cache=TRUE}
+# you can open the file on a text editor and double check the sample order and information.
+head -n 5 output/quality_control/dapc1.fam
+```
+
+```{bash}
+plink \
+--allow-extra-chr \
+--keep-allele-order \
+--bfile output/quality_control/dapc1 \
+--recodeA \
+--out output/quality_control/dapc2 \
+--silent;
+grep 'samples\|variants\|remaining' output/quality_control/dapc2.log
+```
+
+
+```{r, eval=FALSE}
+### DAPC (in adegenet) #####
+snp <- 
+  read.PLINK(
+    here(
+      "output", "quality_control", "dapc2.raw"
+    ),
+    quiet = FALSE,
+    chunkSize = 1000,
+    parallel = require("parallel"),
+    n.cores = 4
+  )
+
+nInd(snp)
+nLoc(snp)
+nPop(snp)
+indNames(snp)
+```
+
+Save it
+```{r, eval=FALSE}
+saveRDS(
+  snp, here(
+    "output", "quality_control", "snp.rds"
+  )
+)
+```
+
+To load it
+```{r}
+snp <- readRDS(
+  here(
+    "output", "quality_control", "snp.rds"
+  )
+)
+```
+
+
+
+Convert to genid
+```{r, eval=FALSE}
+snp2 <- gl2gi(snp, probar = FALSE, verbose = NULL)
+```
+
+Scale
+```{r, eval=FALSE}
+snp3 <- scaleGen(snp2, NA.method="mean")
+class(snp3)
+```
+Save it
+```{r, eval=FALSE}
+saveRDS(
+  snp3, here(
+    "output", "quality_control", "snp3.rds"
+  )
+)
+```
+
+To load it
+```{r}
+snp3 <- readRDS(
+  here(
+    "output", "quality_control", "snp3.rds"
+  )
+)
+```
+
+
+```{r}
+dim(snp3)
+snp3[1:5,1:5]
+```
+
+```{r}
+# Get the populations from the genlight object
+populations <- snp$pop
+```
+
+
+Run DAPC with  object
+```{r, eval=FALSE}
+dapc_snp <- dapc(snp3, n.pca = 3, n.da = 3, grp = populations)
+```
+
+Save it
+```{r, eval=FALSE}
+saveRDS(
+  dapc_snp, here(
+    "output", "quality_control", "dapc_snp.rds"
+  )
+)
+```
+
+To load it
+```{r}
+dapc_snp <- readRDS(
+  here(
+    "output", "quality_control", "dapc_snp.rds"
+  )
+)
+```
+
+
+Plot using different discriminant functions
+```{r}
+col <- funky(3)
+# 1 and 2
+scatter(
+  dapc_snp,
+  bg = "white",
+  scree.da = TRUE,
+  cex = 1,
+  pch = 20,
+  cex.lab = 0.1,
+  col = col,
+  xax = 1, 
+  yax = 2  
+)
+
+```
+
+
+
+```{r}
+pdf(here(
+    "output", "quality_control", "figures" , "PCA_plot_discriminat_functions_12.pdf"), width = 6, height = 6)
+col <- funky(3)
+scatter(
+  dapc_snp,
+  bg = "white",
+  scree.da = TRUE,
+  cex = 1,
+  pch = 20,
+  cex.lab = 0.1,
+  col = col,
+  xax = 1, 
+  yax = 2
+)
+dev.off()
+```
+
+Ade4
+```{r}
+pca1 <- dudi.pca(snp3,cent=FALSE,scale=FALSE,scannf=FALSE,nf=4)
+barplot(pca1$eig[1:50],main="PCA eigenvalues", col=heat.colors(50))
+```
+Save it
+```{r, eval=FALSE}
+saveRDS(
+  pca1, here(
+    "output", "quality_control", "ade4_pca1.rds"
+  )
+)
+```
+
+To load it
+```{r}
+pca1 <- readRDS(
+  here(
+    "output", "quality_control", "ade4_pca1.rds"
+  )
+)
+```
+
+Check the PCAs axes
+
+```{r}
+col <- funky(3)
+s.class(pca1$li, pop(snp), col=transp(col,.6), grid=FALSE)
+title("PCA \naxes 1-2")
+add.scatter.eig(pca1$eig[1:20],nf=4,xax=1,yax=2)
+```
+
+
+```{r}
+col <- funky(3)
+s.class(pca1$li,pop(snp),xax=1,yax=3,sub="PCA 1-3",csub=2,col=transp(col,.6), grid=FALSE) 
+title("PCA \naxes 1-3")
+add.scatter.eig(pca1$eig[1:20],nf=4,xax=1,yax=3)
+```
+
+```{r}
+col <- funky(3)
+s.class(pca1$li,pop(snp),xax=1,yax=4,sub="PCA 1-3",csub=2,col=transp(col,.6), grid=FALSE) 
+title("PCA \naxes 1-3")
+add.scatter.eig(pca1$eig[1:20],nf=4,xax=1,yax=4)
+```
+
+
+PC 1 and 2
+```{r}
+pdf(here(
+    "output", "quality_control", "figures" , "PCA_plot_axes_1_2.pdf"), width = 5, height = 5)
+col <- funky(3)
+s.class(pca1$li, pop(snp), col=transp(col,.6), grid=FALSE)
+title("PCA \naxes 1-2")
+add.scatter.eig(pca1$eig[1:20],nf=4,xax=1,yax=2)
+dev.off()
+```
+
+
+PC 1 and 3
+```{r}
+pdf(here(
+    "output", "quality_control", "figures" , "PCA_plot_axes_1_3.pdf"), width = 5, height = 5)
+col <- funky(3)
+s.class(pca1$li,pop(snp),xax=1,yax=3,sub="PCA 1-3",csub=2,col=transp(col,.6), grid=FALSE) 
+title("PCA \naxes 1-3")
+add.scatter.eig(pca1$eig[1:20],nf=4,xax=1,yax=3)
+dev.off()
+```
+
+
+PC 1 and 4
+```{r}
+pdf(here(
+    "output", "quality_control", "figures" , "PCA_plot_axes_1_4.pdf"), width = 5, height = 5)
+col <- funky(3)
+s.class(pca1$li,pop(snp),xax=1,yax=4,sub="PCA 1-3",csub=2,col=transp(col,.6), grid=FALSE) 
+title("PCA \naxes 1-4")
+add.scatter.eig(pca1$eig[1:20],nf=4,xax=1,yax=4)
+dev.off()
+```
+
+
+
+PC 2 and 4
+```{r}
+pdf(here(
+    "output", "quality_control", "figures" , "PCA_plot_axes_2_4.pdf"), width = 5, height = 5)
+col <- funky(3)
+s.class(pca1$li,pop(snp),xax=1,yax=3,sub="PCA 2-4",csub=2,col=transp(col,.6), grid=FALSE) 
+title("PCA \naxes 2-4")
+add.scatter.eig(pca1$eig[1:20],nf=4,xax=2,yax=4)
+dev.off()
+```
